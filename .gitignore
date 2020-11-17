@@ -4,5 +4,7 @@
 *.png
 *.pdf
 *.rds
+*.Rdata
+*.rdata
 .Rproj.user
 dnanexus/
