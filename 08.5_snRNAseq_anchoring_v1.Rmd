@@ -1,0 +1,167 @@
+---
+title: "snRNAseq_clusters_v1"
+author: "Katie Prater and Kevin Green"
+date: "6/24/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+Sys.setenv(PATH="/acct/guest/.TinyTeX/bin:$PATH:")
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(stringr)
+library(dplyr)
+library(filesstrings)
+```
+#Jayadev Lab snRNAseq Pipeline
+
+##Removal of unwanted effects for cleanup of data
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+##First ensure you have the variables and directories set up as needed for the project. This should be identical to the code chunk you edited the first time. ***You DO need to edit this code chunk! ***
+```{r Setup}
+
+#Document your code:
+print("This is when this code was run:")
+print(Sys.time())
+
+#Define your project folder:
+#projdir <- "path_to_my_project_folder_name"
+projdir <- "~/jayadev/PU.1/exp_2-25-20/Full_sequence/code/repeat_all/"
+
+#Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_normalized_ws_all_19.rdata"
+
+#Does the data need correction? (e.g. batch, mitochondrial genes, etc)
+#Enter TRUE or FALSE
+regression <- TRUE
+
+#Does the data need variable genes identified?
+#Enter TRUE or FALSE
+variable_genes <- TRUE
+
+#Create a list of variables from which to remove unwanted variation.
+#e.g. c("percent.mito", "nCount_RNA", "Library.Batch", "PMI")
+unwanted <- c("percent.mito", "nCount_RNA", "Library.Batch", "Age"
+              #, "PMI" Caused an unknown error when attempting to 
+              #regress out
+              )
+  
+#Define the number of genes you want after variable gene detection:
+nfeatures <- 5000
+
+#Define the assay name used during normalization ("RNA" or "SCT")
+assay <- "RNA"
+
+#Set a list of reference samples to use for integration
+#Set to NULL if no reference sample is used
+reference_samples <- c(9, 10, 12, 13)
+
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print("This is when this code was started:")
+print(Sys.time())
+
+#Load the thresholded Seurat object saved before
+data_loc<-file.path(projdir, "code", start_data, fsep = "/")
+print(paste('Loading data', start_data, sep = " "))
+load(start_data)
+```
+
+```{r Set_Directories}
+#Ensure paths are set for code:
+outpath <- file.path(projdir, outdir, fsep = "/")
+if (file.exists(outpath))
+    {cat("Output directory path works!")} else 
+    {cat("Output directory does not exist - creating")
+    dir.create(outpath)}
+
+#Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+#Documentation:
+print("This is where the project is:")
+print(projdir)
+print("This is where the sample files are:")
+print(sample_dir)
+print("This is where the data files will be saved:")
+print(outpath)
+
+```
+
+## If your normalization only saved the variable genes, you do not need to find them again. If you saved all genes, you will need to identify the variable genes. We default to finding the top 5000 variable genes.
+```{r Var_genes_&_anchors}
+#Downsampling for testing purposes
+# ss_data_norm <- subset(ss_data_norm,
+#                        ident = ss_obj_names,
+#                        downsample = 300)
+
+#Find variable genes if not done already during normalization.
+# if (variable_genes) {
+#   print(paste0("Finding the top ", nfeatures, " variable genes."))
+#   ss_data_norm <- FindVariableFeatures(ss_data_norm,
+#                                     assay = assay,
+#                                     nfeatures = nfeatures)
+# } else {
+#   print("Skipping this step.")
+# }
+# 
+# # Find anchors for individual samples
+# ss_data_norm <-
+#   FindIntegrationAnchors(SplitObject(
+#     ss_data_norm,
+#     split.by = "orig.ident"),
+#   dims = 1:30,
+#   anchor.features = nfeatures,
+#   reference = reference_samples)
+# 
+# ss_data_norm <- IntegrateData(ss_data_norm,
+#                               dims = 1:30)
+
+ss_data_norm <- SplitObject(
+    ss_data_norm,
+    split.by = "orig.ident")
+
+ss_data_norm <- lapply(X = ss_data_norm, FUN = function(x) {
+    x <- NormalizeData(x, verbose = FALSE)
+    x <- FindVariableFeatures(x, verbose = FALSE)
+})
+
+features <- SelectIntegrationFeatures(object.list = ss_data_norm)
+ss_data_norm <- lapply(X = ss_data_norm, FUN = function(x) {
+    x <- ScaleData(x, features = features, verbose = FALSE)
+    x <- RunPCA(x, features = features, verbose = FALSE)
+})
+
+# Find anchors for individual samples
+ss_data_norm <-
+  FindIntegrationAnchors(ss_data_norm,
+  reduction = "rpca",
+  dims = 1:30,
+  anchor.features = nfeatures,
+  reference = reference_samples)
+
+ss_data_norm <- IntegrateData(ss_data_norm,
+                              dims = 1:30)
+
+```
+
+
+## Save the data files.
+```{r Save_Files}
+rm(plot1, plot2)
+#Save workspace image if needed to revisit
+save.image(file = paste0("QCd_norm_anchored_ws", suffix, ".rdata"), compress = TRUE)
+
+```
+

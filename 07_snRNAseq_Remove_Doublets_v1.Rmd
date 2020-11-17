@@ -1,0 +1,156 @@
+---
+title: "snRNAseq_Remove_Doublets_v1"
+author: "Katie Prater"
+date: "5/29/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+library(stringr)
+```
+#Jayadev Lab snRNAseq Pipeline
+
+##Doublet Detection for QC cleanup of data
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+##First ensure you have the variables and directories set up as needed for the project. This should be identical to the code chunk you edited the first time. ***You DO need to edit this code chunk! ***
+```{r Directory_setup}
+#Document your code:
+print("This is when this code was started:")
+print(Sys.time())
+
+#Define your project folder:
+#projdir <- "path_to_my_project_folder_name"
+projdir <- "~/jayadev/PU.1/exp_2-25-20/Full_sequence/code/pu1_only/"
+
+#Name of the Rdata file to load in:
+start_data <- "decon_split_matrices_ws_pu1_only.rdata"
+
+#__________________Do not edit below this line______________________________
+
+
+```
+
+## Load Libraries needed for code
+```{r Load_Libraries}
+print('Loading Libraries Seurat, ggplot2, Matrix, and filesstrings.')
+  library(Seurat)
+  library(ggplot2)
+  library(Matrix)
+  library(filesstrings)
+```
+
+##Load the R workspace that has the data you need to re-threshold the doublet scores
+```{r Load_Rdata}
+#Load the thresholded Seurat object saved before
+data_loc<-file.path(projdir, "code", start_data, fsep = "/")
+print(paste('Loading data', start_data, sep = " "))
+load(start_data)
+
+print(paste(numsubs,'samples processing.', fsep = " "))
+```
+
+##Remove the detected doublets from the count matrices
+```{r Scrublet_Cleanup}
+#Loop to apply Scrublet thresholds to the count matrices
+scrub_tcm_name<- rep(NA, length(samples))
+for (current_sample in 1:length(samples)) {
+
+  #Pull the output from Scrublet back into R
+  if(file.exists(paste0(outpath,'/', names[current_sample],
+                        '_redo_decon_doublet_scores.csv')))
+    {data_filename<-paste0(names[current_sample], '_redo_decon_doublet_scores.csv')
+  }else{
+      data_filename<-paste0(names[current_sample], '_decon_doublet_scores.csv')
+      }
+  scrub_out<-read.csv(paste0(outpath,'/', data_filename))
+  doublets<-scrub_out[,2]
+
+  #Count the number of doublets
+  num_dubs<-length(doublets[doublets=='True'])
+  
+  #Remove doublets from data
+  scrub_tcm_name[[current_sample]]<-paste0(tcm_name[current_sample], '_scrubbed_data')
+  assign(scrub_tcm_name[current_sample],get(tcm_name[current_sample])[doublets=='False',])
+  print(paste(tcm_name[current_sample],num_dubs,'Doublets removed properly:',identical(nrow(get(scrub_tcm_name[current_sample])),nrow(get(tcm_name[current_sample]))-num_dubs), sep = ' '))
+}
+
+#Transpose the sparse matrices to go back to Seurat (genes as rows and cells as columns)
+scrub_cm_name<- rep(NA, length(samples))
+for (index in 1:length(samples)) {
+  scrub_cm_name[index]<-paste0('scrub_cm_', names[index], collapse = "")
+  print(paste('Transposing matrix:', scrub_tcm_name[index], sep=" "))
+  assign(scrub_cm_name[index],t(get(scrub_tcm_name[index])))
+  print(paste('Matrix properly transposed:',identical(ncol(get(scrub_cm_name[index])), nrow(get(scrub_tcm_name[index]))) ,sep=' '))
+}
+
+#Remove extraneous variables from the workspace
+objs<-ls()
+objects_to_remove<-c('scrub_out', 'doublets', grep('tcm_', objs, value = TRUE))
+rm(list=objects_to_remove)
+rm(current_sample, data_filename, file, genes, index, num_dubs, objects_to_remove, objs)
+
+#Save the workspace to load later
+save.image(file = paste0("decon_scrubbed_split_matrices_ws", suffix, ".RData"), compress = TRUE)
+```
+
+## Load the matrices with doublets removed back into Seurat
+```{r Seurat_Objects}
+# Read in meta data from csv file
+meta_data <- read.csv(ss_csv, header = TRUE)
+
+#Generate a Seurat object out of the scrubbed matrices and add meta data
+print('Generating Seurat Objects from scrubbed matrices')
+for (file in 1:length(names)){
+  sample_meta_data <- meta_data[file,]
+  sample_meta_data <- sample_meta_data[rep(seq_len(nrow(sample_meta_data)),
+                                           each = ncol(get(scrub_cm_name[file]))), ]
+  row.names(sample_meta_data) <- get(scrub_cm_name[file])@Dimnames[[2]]
+  ss_data_scrubbed <- CreateSeuratObject(counts = get(scrub_cm_name[file]),
+                                         min.cells = 1,
+                                         project = samples[file],
+                                         meta.data = sample_meta_data)
+  assign(x=names[file], ss_data_scrubbed)
+  rm(list=scrub_cm_name[[file]], sample_meta_data)
+}
+
+rm(meta_data)
+
+#Combine the seurat objects back to one matrix
+if(numsubs>1){
+  ss_data_scrubbed <- merge(get(names[1]),get(names[2]))
+  rm(list = c(names[[1]], names[[2]]))
+  if (length(samples) >= 3){
+    for (obj in 3:length(samples)){
+      ss_data_scrubbed <- merge(ss_data_scrubbed, get(names[obj]))
+      rm(list = names[[obj]])
+    }
+    rm(obj)
+  }
+} else {
+  rm(list = names)
+}
+ss_data_scrubbed[["percent.mito"]] <- PercentageFeatureSet(ss_data_scrubbed,
+                                                           pattern = "^MT-")
+
+#Save the Seurat object so that we can load it again later
+print('Saving Seurat object as seurat_ss_data_decon_scrubbed_thresholded.rds')
+saveRDS(ss_data_scrubbed, file = 'seurat_ss_data_decon_scrubbed_thresholded.rds') 
+save.image(file = paste0("decon_scrubbed_thresholded_ws", suffix, ".rdata"), compress = TRUE)
+
+####This code is not currently supported by seurat - you cannot have load a different number of cells back into the existing seurat objects. ####
+#Place the scrubbed count matrices back into the Seurat Object
+#Load the thresholded split Seurat object saved before
+#print('Loading thresholded split Seurat Object')
+#ss_data_split <- readRDS("seurat_ss_data_split_thresholded.rds")
+
+#for (index in 1:length(samples)) {
+#    print(paste('Working on matrix:', scrub_cm_name[index], sep=" "))
+#  SetAssayData(object = ss_data_split[[index]], slot = "data", new.data = get(scrub_cm_name[index]))
+#  print(paste('Matrices match dimensions:', identical(dim(get(scrub_cm_name[index])), dim(ss_data_split[[index]]))))
+#}
+```

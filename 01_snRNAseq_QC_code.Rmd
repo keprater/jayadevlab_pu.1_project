@@ -1,0 +1,308 @@
+---
+title: "JayadevLab_snRNAseq_Pipeline_QC_portion_v1.1"
+author: "Katherine E. Prater and Kevin Green"
+date: "3/27/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(foreach)
+library(doParallel)
+library(stringr)
+```
+
+# Jayadev Lab RNAseq Data Processing Pipeline
+
+## Define your project folders, filenames, and variables of interest.
+# You MUST edit this for your dataset to run properly!!!!
+```{r 'Project_Information', echo=TRUE}
+#Document your code:
+print("This is when this code was run:")
+print(Sys.time())
+
+#Give your project a name (short):
+#proj <- "my_project_name"
+proj <- "PU1_pilot"
+
+#Define your project folder:
+#projdir <- "path_to_my_project_folder_name"
+projdir <- "~/jayadev/PU.1/exp_2-25-20/Full_sequence/"
+
+#File path to your participant/sample files:
+#sample_dir <- "path_to_my_sample_files"
+sample_dir <- "~/jayadev/PU.1/exp_2-25-20/Full_sequence/raw_matrices/"
+
+#Define your participant/sample numbers:
+#samples <- c("sample1", "sample2", "sample3") 
+samples <- dir(sample_dir, full.names = FALSE,
+               pattern = "*PU1*"
+               )
+#Note that you can use s* or the appropriate file name with the wildcard * if you want to process all files in your project directory
+
+#Define a project suffix for file names when multiple runs are done on the same dataset (e.g. "_rerun")
+suffix <- "pu1_only"
+
+#Define your participant file name after the subject number:
+#filenames <- "raw_feature_bc_matrices.gz"
+
+#Define the file name of the sample variables to be added for analysis (e.g. .csv file with pathology, diagnosis, age, etc.)
+ss_csv <- "samples_project_metadata.csv"
+
+#Output directory name:
+#outdir <- "output"
+outdir <- "output/output_pu1_only"
+
+#Number of participants/samples to process:
+numsubs <- length(samples)
+
+
+```
+
+## Start by installing Seurat and packages necessary to work with the snRNAseq data if your system needs them.
+
+```{r 'Install_Libraries', warning=FALSE}
+#If statements check to see if you do not have the package installed then install it from the appropriate source if needed.#
+if (!requireNamespace("synapser", quietly = TRUE)) {
+  install.packages("synapser", repos=c("http://ran.synapse.org", "http://cran.fhcrc.org"))
+}
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+  BiocManager::install()
+  BiocManager::install(c("batchelor","Biobase", "BiocGenerics","DelayedArray","DelayedMatrixStats","GenomeInfoDb","limma","multtest","S4Vectors","scater","scran","SingleCellExperiment","SummarizedExperiment"))
+  BiocManager::install("GenomeInfoDbData", type = "source")
+}
+
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+  
+if (!requireNamespace("Matrix.utils", quietly = TRUE)) {
+  devtools::install_github('cvarrichio/Matrix.utils')
+}
+
+if (!requireNamespace("monocle3", quietly = TRUE)) {
+  devtools::install_github('cole-trapnell-lab/leidenbase')
+  devtools::install_github('cole-trapnell-lab/monocle3')
+}
+  
+if (!requireNamespace("Seurat",quietly = TRUE)) {
+  install.packages('Seurat')
+}
+  
+if (!requireNamespace("multtest",quietly = TRUE)) {
+  BiocManager::install('multtest')
+}
+  
+if (!requireNamespace("SoupX", quietly = TRUE)) {
+  devtools::install_github("constantAmateur/SoupX")
+}
+
+for (library in c("doParallel", "foreach", "parallel")) {
+  if (!requireNamespace(library, quietly = TRUE)) {
+    install.packages(library)
+  }
+}
+  
+```
+
+##Data Initialization 
+Take raw count files from Cell Ranger, read them into Seurat objects and aggregate.
+
+First check that all the file paths are properly identified.
+```{r 'File_Paths'}
+#Check if project directories identified exist and create them if not.
+#Confirm project directory exists.
+if (file.exists(projdir))
+    {cat("Project directory path works!\n")} else 
+    {cat("Project directory does not exist. Please check path inputs.\n")}
+
+#Confirm sample directory exists.
+if (file.exists(sample_dir))
+    {cat("Sample directory path works!\n")} else 
+    {cat("Sample directory does not exist. Please check path inputs.\n")}
+
+#Check if output directory exists or needs to be created.
+outpath <- file.path(projdir, outdir, fsep = "/")
+if (file.exists(outpath))
+    {cat("Output directory path works!\n")} else 
+    {cat("Output directory does not exist - creating\n")
+    dir.create(outpath)}
+
+#Make a QC plots folder to save the files.
+plotspath <- file.path(projdir, outdir, "qc_plots", fsep = "/")
+if (file.exists(plotspath)){
+  paste("The directory ", plotspath, " already exists!")
+} else {
+  dir.create(plotspath)
+  paste("Creating directory: ", plotspath)
+}
+
+#Set the working directory to the project directory.
+setwd(projdir) 
+cwd <- getwd() #sets cwd to be the current working directory (project folder)
+```
+Now generate Seurat objects of the data.
+```{r 'Generate_SeuratObjects'}
+#Set your working directory so that any output goes where it's supposed to.
+setwd(outpath)
+print("This is where your files will be saved:")
+getwd()
+
+#Generate paths to data directories where barcodes.tsv.gz, features.tsv.gz and matrix.mtx.gz are located 
+#samples_filenames <- paste(samples, filenames, sep="_", collapse = NULL)
+samples_path <- file.path(sample_dir, samples, fsep="/")
+
+#create an array of the sample names
+names <- rep(NA, length(samples))
+
+#Create Seurat objects from each data file with a minimum of 150 counts per droplet
+list.files(sample_dir)
+for (file in 1:length(samples_path)){
+  seurat_data <- Read10X(data.dir = samples_path[file])
+  seurat_obj <- CreateSeuratObject(counts = seurat_data, 
+                                   min.features = 150,
+                                   project = samples[file])
+  names[file] <- str_sub(samples[file], 1, -23)
+  assign(x=names[file], seurat_obj)
+}
+
+#Remove the variables that are no longer needed
+rm(seurat_data, seurat_obj)
+```
+Aggregate the data into one matrix.
+```{r echo=TRUE}
+#Join the individual patient matrices into one
+#ss_data <- cbind2(samples[1],samples[2])
+#for (obj in 3:numsubs) {
+#  ss_data <- cbind2(ss_data, samples[obj])
+#}
+
+#Join the individual patient matrices into one
+if (length(samples) > 1) {
+  ss_data <- merge(get(names[1]),get(names[2]))
+  rm(list = c(names[[1]], names[[2]]))
+  if (length(samples_path) >= 3){
+    for (obj in 3:length(samples_path)){
+      ss_data <- merge(ss_data, get(names[[obj]]))
+      rm(list = names[[obj]])
+      }
+  }
+} else {
+  ss_data <- get(names[1])
+}
+
+#print("Check if the number of samples expected match the dimensions of your data")
+#print(numsubs)
+#dim(ss_data@active.ident)
+
+#Save the combined data
+#saveRDS(ss_data, file = "seurat_ss_data_remaining2.rds")
+```
+## QC and selecting cells for further analysis
+
+Seurat allows you to easily explore QC metrics and filter cells based on any user-defined criteria. A few QC metrics [commonly used](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4758103/) by the community include
+
+* The number of unique genes detected in each cell. 
+    + Low-quality cells or empty droplets will often have very few genes
+    + Cell doublets or multiplets may exhibit an aberrantly high gene count
+* Similarly, the total number of molecules detected within a cell (correlates strongly with unique genes)
+* The percentage of reads that map to the mitochondrial genome
+    + Low-quality / dying cells often exhibit extensive mitochondrial contamination
+    + We calculate mitochondrial QC metrics with the `PercentageFeatureSet` function, which calculates the percentage of counts originating from a set of features
+    + We use the set of all genes starting with `MT-` as a set of mitochondrial genes
+```{r 'Calcuate_QC_Stats'}
+knitr::opts_knit$set(root.dir=outpath)
+
+#Document your code:
+print("This is when this code was run:")
+print(Sys.time())
+
+#Calculate the percentage of mitochondrial genes
+ss_data[["percent.mito"]] <- PercentageFeatureSet(object = ss_data, pattern = "^MT-")
+
+#Save the combined data
+saveRDS(ss_data, file = paste0("seurat_ss_data", suffix, ".rds"))
+
+#Save workspace image if needed to revisit
+save.image(file = paste0("thresholded", suffix, ".rdata"), compress = TRUE)
+```
+##Visualize your QC data
+```{r}
+library(ggplot2)
+
+#Visualize QC metrics as a violin plot to look for outliers
+png(paste0("QC_vln_plot", suffix, ".png"), 800, 800)
+VlnPlot(object = ss_data, features = c("nFeature_RNA", "nCount_RNA"), ncol=2)
+        #, "percent.mito"), ncol = 3)
+dev.off()
+
+#FeatureScatter is typically used to visualize feature-feature relationships, such as those between variables we will threshold on.
+plot1 <- FeatureScatter(object = ss_data, feature1 = "nCount_RNA", feature2 = "percent.mito") 
+plot2 <- FeatureScatter(object = ss_data, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") 
+
+#Save the plots
+#setwd(plotspath)
+png(paste0(plotspath, "/QC_feature_scatterplots", suffix, ".png"), 800, 800)
+plot1
+#CombinePlots(plots = list(plot1,plot2))
+dev.off()
+
+png(paste0(plotspath, "/QC_feature_scatterplots", suffix, ".png"), 800, 800)
+plot2
+dev.off()
+
+#QC metric histograms colored by sample
+
+plot3 <-  ggplot(ss_data@meta.data, aes(color=ss_data@meta.data$orig.ident, x=nCount_RNA, fill=ss_data@meta.data$orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() +
+  xlab("Number of copies/gene") +
+  ylab("Frequency") +
+  geom_vline(xintercept = 350)
+
+png(paste0(plotspath, "/QC_num_copies_gene", suffix, ".png"), 800, 800)
+  plot3
+dev.off()
+
+plot4 <-  ggplot(ss_data@meta.data, aes(color=ss_data@meta.data$orig.ident, x=percent.mito, ill=ss_data@meta.data$orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() +
+  xlab("% Mitochondrial Genes") +
+  ylab("Frequency") +
+  geom_vline(xintercept = 5.0)
+
+png(paste0(plotspath, "/QC_mitochondrial_ratio", suffix, ".png"), 800, 800)
+  plot4
+dev.off()
+
+plot5 <-  ggplot(ss_data@meta.data, aes(color=ss_data@meta.data$orig.ident, x=nFeature_RNA, ill=ss_data@meta.data$orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  theme_classic() +
+  scale_x_log10() +
+  xlab("Number of genes/cell") +
+  ylab("Frequency") +
+  geom_vline(xintercept = 350)
+
+png(paste0(plotspath, "/QC_num_genes_cell", suffix, ".png"), 800, 800)
+  plot5
+dev.off()
+
+#Save the plots
+png(paste0(plotspath, "/QC_feature_histograms_by_sample", suffix, ".png"),
+    1800, 900)
+CombinePlots(plots = list(plot3,plot4,plot5))
+dev.off()
+
+```
+
