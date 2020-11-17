@@ -1,0 +1,170 @@
+---
+title: "snRNAseq_clusters_v1"
+author: "Katie Prater and Kevin Green"
+date: "6/24/2020"
+output: 
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(stringr)
+library(dplyr)
+library(filesstrings)
+```
+#Jayadev Lab snRNAseq Pipeline
+
+##Removal of unwanted effects for cleanup of data and clustering
+## Hard coded the number of PCs to be 5 (should be 95% of the variance) to see what that does to the clustering. Previous analysis had chosen 8 PCs.
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+##First ensure you have the variables and directories set up as needed for the project. This should be identical to the code chunk you edited the first time. ***You DO need to edit this code chunk! ***
+```{r Setup}
+#Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_norm_anchored_wscaleDx_ws_pu1_only.rdata"
+
+#Define the number of genes you want after variable gene detection:
+nfeatures <- 5000
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+#Load the thresholded Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+#Update suffix
+suffix <- "_20200910_5PCs"
+
+# Update the project folders
+projdir <- "../"
+
+```
+
+```{r Set_Directories}
+#Ensure paths are set for code:
+outpath <- file.path(projdir, outdir, "umaps", fsep = "/")
+if (file.exists(outpath))
+    {cat("Output directory path works!")} else 
+    {cat("Output directory does not exist - creating")
+    dir.create(outpath)}
+
+#Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+#Documentation:
+print("This is where the project is:")
+print(projdir)
+print("This is where the sample files are:")
+print(sample_dir)
+print("This is where the data files will be saved:")
+print(outpath)
+
+```
+
+## If your normalization only saved the variable genes, you do not need to find them again. If you saved all genes, you will need to identify the variable genes. We default to finding the top 5000 variable genes.
+
+```{r PCA}
+#Define the assay name to use ("RNA", "integrated" or "SCT")
+assay <- "integrated"
+
+#Run PCA
+print("Running PCA")
+print(Sys.time())
+ss_data_norm <- RunPCA(ss_data_norm, 
+                  assay = assay, 
+                  features = VariableFeatures(ss_data_norm), 
+                  npcs = 20)
+
+#Determine the number of PCs required to obtain a change in standard deviation less than 0.1.
+#Want to implement this: to account for 90% of the variance of the data with line of code commented below.
+PCs <-Stdev(ss_data_norm@reductions$"pca")
+print(paste("The variance accounted for by all prinicple components is:", sum(PCs), sep = " "))
+#PCs <- min(which(cumsum(PCs) > 90))
+print(paste("The number of prinicple components needed to account for greater than 90% of the variance is:", min(which(cumsum(PCs) > 90)), sep = " "))
+print(paste("The number of prinicple components needed to account for greater than 95% of the variance is:", min(which(cumsum(PCs) > 95)), sep = " "))
+PCs <- min(which(diff(PCs) > -.1))
+print(paste("The recommended number of prinicple components is:", PCs, sep = " "))
+
+
+#Generate an elbow plot for the PCA   
+plot1 <- ElbowPlot(ss_data_norm)
+png(paste0(outpath, "/PC_elbow_plot_combined_data_wscale", suffix, ".png"))
+print(plot1)
+dev.off()
+
+```
+
+## Generate UMAP for dataset
+```{r Cluster}
+#Find Nearest Neighbors
+print("Finding nearest neighbors")
+print(Sys.time())
+ss_data_norm <- FindNeighbors(ss_data_norm,
+                           dims = 1:5, #Hard set to 5 PCs to see what it does to clusters
+                           assay = assay,
+                           verbose = TRUE)
+
+#Find clusters
+print("Finding clusters")
+print(Sys.time())
+ss_data_norm <- FindClusters(ss_data_norm,
+                         resolution = c(0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2))
+
+resolutions <- c(paste0(assay, "_snn_res.0.1"),
+                 paste0(assay, "_snn_res.0.2"), 
+                 paste0(assay, "_snn_res.0.4"), 
+                 paste0(assay, "_snn_res.0.6"), 
+                 paste0(assay, "_snn_res.0.8"), 
+                 paste0(assay, "_snn_res.1"),
+                 paste0(assay, "_snn_res.1.2"))
+
+umap_pngs <- c("UMAP_0.1", "UMAP_0.2", "UMAP_0.4", "UMAP_0.6", "UMAP_0.8", "UMAP_1.0", "UMAP_1.2")
+
+#Identify clusters:
+print("Making UMAP clusters")
+print(Sys.time())
+ss_data_norm <- RunUMAP(ss_data_norm,
+                         assay = assay,
+                         dims = 1:5) # Hard coded to 5 PCs
+
+#Plot clusters
+plot_clusters <- function(data, resolutions, label) {
+  for (resolution in 1:length(resolutions)) {
+    plot2 <- DimPlot(object = data,
+                     reduction = "umap",
+                     group.by = resolutions[[resolution]],
+                     pt.size = 2,
+                     label = TRUE,
+                     label.size = 10)
+    png(paste0(outpath, "/", proj, "_",
+                umap_pngs[[resolution]], "_",
+                label, suffix, ".png", sep = ""), 800, 800)
+    print(plot2)
+    dev.off()
+  }
+}
+
+plot_clusters(ss_data_norm,resolutions, "postQC_anchored_wscale")
+```
+
+## Save the data files.
+```{r Save_Files}
+rm(plot1, plot2)
+#Save workspace image if needed to revisit
+save.image(file = paste0("../data/r_files/", "QCd_norm_anchored_clustered_wscale_ws", suffix, ".rdata"), compress = TRUE)
+
+```
+

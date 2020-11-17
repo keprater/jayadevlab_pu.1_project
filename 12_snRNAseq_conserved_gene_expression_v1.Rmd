@@ -1,0 +1,108 @@
+---
+title: "12_snRNAseq_conserved_gene_expression_v1"
+author: "Katie Prater"
+date: "8/14/2020"
+output: 
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(stringr)
+library(dplyr)
+#library(filesstrings)
+library(metap)
+library(readr)
+```
+
+#Jayadev Lab snRNAseq Pipeline
+
+##Detection of Conserved genes by cluster. To better detect cell identities or confirm identities you chose before.
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+##First ensure you have the variables and directories set up as needed for the project. This should be identical to the code chunk you edited the first time. ***You DO need to edit this code chunk! ***
+```{r Setup}
+#Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_data_subset_Dx_idents_ws_MG_subset_0.2subset012356_20200910.rdata"
+
+#Change output path if necessary, otherwise leave NULL
+change_output_path <- "../output/output_pu1_only/degs/MG_subset_0.2subset012356/"
+
+#Cluster numbers for checking conserved genes (use numbers from the resolution you chose before):
+conserved_clust_nums <- c("1", "4", "5")
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print("This is when this code was started:")
+print(Sys.time())
+
+#Load the rData saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+#Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+```
+## Ensure your directories are set properly.
+```{r Set_Directories}
+#Ensure paths are set for code:
+if (file.exists(outpath))
+    {cat("Output directory path works!")} else 
+    {cat("Output directory does not exist - creating")
+    dir.create(outpath)}
+
+#Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+#Documentation:
+print("This is where the project is:")
+print(projdir)
+print("This is where the sample files are:")
+print(sample_dir)
+print("This is where the data files will be saved:")
+print(outpath)
+
+```
+## Calculate the conserved genes for each cluster you identified above.
+```{r Calc_Conserved}
+#Save current idents:
+ss_data_norm$cluster_names <- Idents(ss_data_norm)
+
+#Set cluster identities in Seurat object to the numbers from the resolution you chose previously
+Idents(object = ss_data_norm)<-res_name
+
+#Find conserved genes for each cluster you selected.
+cluster_var_name<- rep(NA, length(conserved_clust_nums))
+for (index in 1:length(conserved_clust_nums)) {
+  cluster_var_name[index]<-paste0('conserved_genes_cluster_', conserved_clust_nums[index], collapse = "")
+  print(paste('Collecting conserved genes from cluster:', cluster_var_name[index], sep=" "))
+  assign(cluster_var_name[index], FindConservedMarkers(ss_data_norm, ident.1 = conserved_clust_nums[index], grouping.var = var_subset))
+ print(paste('Number of conserved genes in:', cluster_var_name[index], nrow(get(cluster_var_name[index])), sep=" "))
+ head(get(cluster_var_name[index]), 5)
+}
+
+#Write csv files for conserved genes.
+for (index in 1:length(conserved_clust_nums)) {
+  print(paste('Writing CSV for cluster:', conserved_clust_nums[index], sep=" "))
+  write.csv(get(cluster_var_name[index]), paste0(outpath,
+                         "conserved_genes_cluster_", conserved_clust_nums[index],
+                         suffix, ".csv"))
+}
+
+```
+
+## You may want to rerun script 11 - cluster labeling if you determine additional naming details about your clusters based on their conserved gene expression.

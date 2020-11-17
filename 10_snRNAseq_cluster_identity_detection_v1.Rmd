@@ -1,0 +1,331 @@
+---
+title: "snRNAseq_cluster_identity_detection_v1"
+author: "Katie Prater and Kevin Green"
+date: "6/24/2020"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(stringr)
+library(dplyr)
+library(filesstrings)
+```
+#Jayadev Lab snRNAseq Pipeline
+
+##Cluster identity detection by gene expression
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+##First ensure you have the variables and directories set up as needed for the project. This should be identical to the code chunk you edited the first time. ***You DO need to edit this code chunk! ***
+```{r Setup}
+#Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_norm_anchored_clustered_wscale_ws_MG_subset_20200910.rdata"
+
+#Tissue type: (brain, blood) - organoid is considered brain-related
+#tissue_type <- "brain"
+tissue_type <- "brain"
+
+#Cell Type (organoid, unsorted, pu1, pbmcs):
+#cell_type <- "organoid"
+cell_type <- "pu1"
+
+#Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.2"
+
+#Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL #"../output/output_pu1_only"
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+#Load the rData saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+#suffix <- "_pu1_only"
+if (!is.null(change_output_path)) {
+  outpath <- change_output_path
+}
+
+#Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+```
+
+```{r Set_Directories}
+#Ensure paths are set for code:
+umaps_path <- outpath
+if (file.exists(umaps_path))
+    {cat("Output directory path works!")} else 
+    {cat("Output directory does not exist - creating")
+    dir.create(umaps_path)}
+
+#Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+#Documentation:
+print("This is where the project is:")
+print(projdir)
+print("This is where the sample files are:")
+print(sample_dir)
+print("This is where the data files will be saved:")
+print(umaps_path)
+
+```
+
+## Use the given "tissue" and cell type" to determine which gene sets are used in making plots of expression on the umap clusters for this dataset.
+```{r Cell_Identity_Maps}
+#Check to see whether the tissue is brain or blood, then determine what cell types are being analyzed. Make umap gene expression plots accordingly.
+if(identical(tissue_type, "brain")){
+   print(paste("Tissue analyzed is brain-related:", identical(tissue_type,"brain"), sep = " "))
+  if(!identical(cell_type, "organoid")){
+    if(identical(cell_type, "pu1")){
+      print(paste("Cell type analyzed is PU.1:", identical(cell_type,"pu1"), sep = " "))
+      #Make initial plot of generic brain cell-type specific genes
+      plot1<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("PDGFRA", "COL9A1", "TMEM63A", "ST18",
+                         "LEF1", "ITIH5", "S100B", "FGFR3",
+                         "C3", "CD74", "SPI1", "CHD5", "GABRG2", "CCR2"))
+      ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot1)
+      
+      #Plot known mglia markers
+      plot2<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("C3", "CD74", "C1QB", "CX3CR1", "SPI1"))
+      ggsave(filename = paste0(umaps_path,"/", cell_type, "_mglia_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot2)
+    
+      #Plot genes by cluster for broad cell types
+      feature_genes <- c("SPI1", "C3", "CD74", "C1QB", "CX3CR1","GFAP", "S100B", "ALDH1L1", "AQP4", "MAP2", "SATB2", "CALB2", "RBFOX3","SLC17A7", "GRIA1", "GRIN1", "GRIN2B","GAD1", "GAD2", "SLC6A1", "SLC6A11","NES", "SOX2", "DCX", "NEUROD1","PDGFRA", "COL9A1", "COL20A1", "SOX8", "MYT1", "TMEM63A", "ST18", "TGFBR2", "LEF1", "ITIH5", "CCR2")
+      
+      #Check whether feature genes are in the variable features of your data.
+      check_genes <- function(pattern){
+        str_subset(rownames(ss_data_norm@assays$integrated@scale.data), paste0("^",pattern,"$"))
+      }
+      feat_in_data <- lapply(feature_genes, check_genes)
+      feat_in_data <- unique(as.vector(feat_in_data[lapply(feat_in_data, length) >0], mode = "character"))
+       
+      #make resolution name:
+      res_name<- paste0(assay, "_snn_res.", chose_resolution)
+
+      #Set cluster identities in Seurat object
+      Idents(object = ss_data_norm)<-res_name
+      
+      plot3 <- DoHeatmap(ss_data_norm, 
+                        features = feat_in_data,
+                        assay = assay,
+                        raster = FALSE,
+                        hjust = 1,
+                        angle = 0)
+      ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_cluster_heatmap_", chose_resolution, suffix, ".pdf"), height = 7, width = 11, plot = plot3)
+      
+      plot4 <- DotPlot(ss_data_norm, 
+                        features = feat_in_data,
+                        assay = assay) + RotatedAxis()
+      ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_cluster_dotplot_", chose_resolution, suffix, ".pdf"), height = 7, width = 11, plot = plot4)
+        
+    }else{
+      print(paste("Cell type analyzed is unsorted:", identical(cell_type,"unsorted"), sep = " "))
+      #Make initial plot of generic brain cell-type specific genes
+      plot1<- FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("PDGFRA", "COL9A1", "TMEM63A", "ST18",
+                         "LEF1", "ITIH5", "S100B", "FGFR3",
+                         "C3", "CD74", "CHD5", "GABRG2"))
+       ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot1)
+      
+       #Plot genes by cluster for broad cell types
+      feature_genes <- c("SPI1", "C3", "CD74", "C1QB", "CX3CR1","GFAP", "S100B", "ALDH1L1", "AQP4", "MAP2", "SATB2", "CALB2", "RBFOX3","SLC17A7", "GRIA1", "GRIN1", "GRIN2B","GAD1", "GAD2", "SLC6A1", "SLC6A11","NES", "SOX2", "DCX", "NEUROD1","PDGFRA", "COL9A1", "COL20A1", "SOX8", "MYT1", "TMEM63A", "ST18", "TGFBR2", "LEF1", "ITIH5")
+      
+      #Check whether feature genes are in the variable features of your data.
+      check_genes <- function(pattern){
+        str_subset(rownames(ss_data_norm@assays$integrated@scale.data), paste0("^",pattern,"$"))
+      }
+      feat_in_data <- lapply(feature_genes, check_genes)
+      feat_in_data <- unique(as.vector(feat_in_data[lapply(feat_in_data, length) >0], mode = "character"))
+       
+            #make resolution name:
+      res_name<- paste0(assay, "_snn_res.", chose_resolution)
+
+      #Set cluster identities in Seurat object
+      Idents(object = ss_data_norm)<-res_name
+      
+      plot2 <- DotPlot(ss_data_norm, 
+                        features = feat_in_data,
+                        assay = assay) + RotatedAxis()
+      ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_cluster_dotplot_", chose_resolution, suffix, ".pdf"), height = 7, width = 11, plot = plot2)
+       
+        #Plot progenitor markers
+        plot3<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("NES", "SOX2", "DCX", "NEUROD1", "CALB2",
+                         "RBFOX3"))
+        ggsave(filename = paste0(umaps_path,"/", cell_type, "_progenitor_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot3)
+      
+       #Plot known mglia markers
+       plot4<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("C3", "CD74", "C1QB", "CX3CR1", "SPI1"))
+       ggsave(filename = paste0(umaps_path,"/", cell_type, "_mglia_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot4)
+  
+       #Explore known astrocyte markers
+       plot5<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("GFAP", "S100B", "ALDH1L1", "AQP4"))
+       ggsave(filename = paste0(umaps_path,"/", cell_type, "_astrocyte_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot5)
+       
+       #Explore known neuronal markers
+       plot6<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("MAP2", "SATB2", "CALB2", "RBFOX3"))
+       ggsave(filename = paste0(umaps_path,"/", cell_type, "_neuronal_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot6)
+
+       #Plot glutamatergic neurons
+      plot7<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("SLC17A7", "GRIA1", "GRIN1", "GRIN2B"))
+      ggsave(filename = paste0(umaps_path,"/", cell_type, "_glut_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot7)
+    
+      #Plot gabaergic neuron markers
+     plot8<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("GAD1", "GAD2", "SLC6A1", "SLC6A11"))
+     ggsave(filename = paste0(umaps_path,"/", cell_type, "_gaba_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot8)
+ 
+           
+    }
+  }else{
+    print(paste("Cell type analyzed is organoid:", identical(cell_type,"organoid"), sep = " "))
+    #Make initial plot of generic brain cell-type specific genes
+    plot1<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("PDGFRA", "COL9A1", "TMEM63A", "ST18",
+                         "LEF1", "ITIH5", "S100B", "FGFR3",
+                         "C3", "CD74", "CHD5", "GABRG2"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 12, plot = plot1)
+    
+    #Plot progenitor markers
+    plot2<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("NES", "SOX2", "DCX", "NEUROD1", "CALB2",
+                         "RBFOX3"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_progenitor_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot2)
+    
+    #Plot known mglia markers
+    plot3<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("C3", "CD74", "C1QB", "CX3CR1"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_mglia_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot3)
+    
+    #Plot known mesoderm markers
+    plot4<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("KDR", "MESP1", "MESP2", "LEFTY2", "OSR1", "CSF1R"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_mesoderm_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot4)
+    
+    #Explore known neuronal markers
+    plot5<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("MAP2", "SATB2", "CALB2", "RBFOX3"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_neuronal_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot5)
+    
+    #Plot mature neuronal markers
+    plot6<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("MAP2", "RBFOX3", "NLGN1", "NRXN1",
+                         "SYP", "DLG4"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_mature_neuron_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot6)
+    
+    #Plot immature neuronal markers
+    plot7<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("DCX","TBR1", "BCL11B"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_immature_neuron_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot7)
+    
+    #Commitment to neuronal fate markers
+    plot8<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("TUBB3", "OTX2", "NEUROG2", "ASCL1"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_early_neuron_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot8)
+    
+    #Plot neural progenitor markers
+    plot9<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("NES", "SOX2", "PAX6", "NOTCH1"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_neural_progenitor_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot9)
+    
+    #Plot hematopoeitic/myeloid markers
+    plot10<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("SPI1", "RUNX1", "KIT"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_myeloid_progenitor_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot10)
+    
+    #Plot glutamatergic neurons
+    plot11<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("SLC17A7", "GRIA1", "GRIN1", "GRIN2B"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_glut_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot11)
+    
+    #Plot gabaergic neuron markers
+    plot12<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("GAD1", "GAD2", "SLC6A1", "SLC6A11"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_gaba_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot12)
+   
+     #Explore known astrocyte markers
+       plot13<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("GFAP", "S100B", "ALDH1L1", "AQP4"))
+       ggsave(filename = paste0(umaps_path,"/", cell_type, "_astrocyte_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 11, plot = plot13)
+        
+       #Plot genes by cluster for broad cell types
+      feature_genes <- c("C3", "CD74", "C1QB", "CX3CR1","GFAP", "S100B", "ALDH1L1", "AQP4", "MAP2", "SATB2", "CALB2", "RBFOX3","SLC17A7", "GRIA1", "GRIN1", "GRIN2B","GAD1", "GAD2", "SLC6A1", "SLC6A11","NES", "SOX2", "DCX", "NEUROD1","PDGFRA", "COL9A1", "COL20A1", "SOX8", "MYT1", "TMEM63A", "ST18", "TGFBR2", "LEF1", "ITIH5")
+      
+      #Check whether feature genes are in the variable features of your data.
+      check_genes <- function(pattern){
+        str_subset(rownames(ss_data_norm@assays$integrated@scale.data), paste0("^",pattern,"$"))
+      }
+      feat_in_data <- lapply(feature_genes, check_genes)
+      feat_in_data <- unique(as.vector(feat_in_data[lapply(feat_in_data, length) >0], mode = "character"))
+       
+            #make resolution name:
+      res_name<- paste0(assay, "_snn_res.", chose_resolution)
+
+      #Set cluster identities in Seurat object
+      Idents(object = ss_data_norm)<-res_name
+      
+      plot14 <- DotPlot(ss_data_norm, 
+                        features = feat_in_data,
+                        assay = assay) + RotatedAxis()
+      ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_cluster_dotplot_", chose_resolution, suffix, ".pdf"), height = 7, width = 11, plot = plot14)
+       
+  }
+}else{
+     print(paste("Tissue analyzed is blood:", identical(tissue_type,"blood"), sep = " ")) 
+    print(paste("Cell type analyzed is pbmcs:", identical(cell_type,"pbmc"), sep = " "))
+    #Make initial plot of generic brain cell-type specific genes
+    plot1<-FeaturePlot(ss_data_norm, 
+            reduction = "umap", 
+            features = c("IL7R", "CCR7", "CD14", "LYZ",
+                         "IL7R", "S100A4", "MS4A1", "CD8A",
+                         "FCGR3A", "MS4A7", "GNLY", "NKG7", 
+                         "FCER1A", "CST3", "PPBP"))
+    ggsave(filename = paste0(umaps_path,"/", cell_type, "_general_gene_expression_umap_", chose_resolution, suffix, ".png"), height = 7, width = 12, plot = plot1)
+  
+}
+```
+

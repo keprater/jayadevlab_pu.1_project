@@ -1,0 +1,205 @@
+---
+title: "Seurat_SCTransformation_Normalization"
+author: "Kevin Green and Katie Prater"
+date: "6/2/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+Sys.setenv(PATH="/acct/guest/.TinyTeX/bin:$PATH:")
+library(Seurat)
+library(monocle3) 
+library(Matrix)
+library(ggplot2)
+library(foreach)
+library(doParallel)
+library(stringr)
+```
+
+# Jayadev Lab RNAseq Data Processing Pipeline
+
+## Define your project folders, filenames, and variables of interest.
+# You MUST edit this for your dataset to run properly!!!!
+```{r 'Project_Information', echo=TRUE}
+#Document your code:
+print("This is when this code was run:")
+print(Sys.time())
+
+# Load data with ambient RNA and doublets removed
+ss_data_scrubbed <- readRDS("seurat_ss_data_redo2_decon_scrubbed_thresholded.rds")
+
+#Give your project a name (short):
+#proj <- "my_project_name"
+proj <- "PU1_pilot"
+
+#Define your project folder:
+#projdir <- "path_to_my_project_folder_name"
+projdir <- "~/jayadev/PU.1/exp_2-25-20/Full_sequence/"
+
+#File path to your participant/sample files:
+#sample_dir <- "path_to_my_sample_files"
+sample_dir <- "~/jayadev/PU.1/exp_2-25-20/Full_sequence/raw_matrices/"
+
+#Define your participant/sample numbers:
+#samples <- c("sample1", "sample2", "sample3") 
+samples <- dir(sample_dir, full.names = FALSE,
+               pattern = "^s6731|^s6761|^s6789|^s6802|^s6815|^s6874"
+               )
+#Note that you can use s* or the appropriate file name with the wildcard * if you want to process all files in your project directory
+
+#Define a project suffix for file names when multiple runs are done on the same dataset (e.g. "_rerun")
+suffix <- "_last_6_regressed"
+
+#Define your participant file name after the subject number:
+#filenames <- "raw_feature_bc_matrices.gz"
+
+#Define the file name of the sample variables to be added for analysis
+#(e.g. .csv file with pathology, diagnosis, age, etc.)
+ss_csv <- "samples_project_metadata_last_6.csv"
+
+#Output directory name:
+#outdir <- "output"
+outdir <- "output"
+
+#Set the name for the assay to be defined in SCTransform 
+#("RNA" or "SCT")
+assay <- "RNA"
+
+#Number of participants/samples to process:
+numsubs <- length(samples)
+
+#Create a list of variables from which to remove unwanted variation.
+#e.g. c("percent.mito", "nCount_RNA", "Library.Batch", "PMI")
+unwanted <- c("percent.mito", "nCount_RNA", "Library.Batch", "PMI")
+
+#Create list of names for each sample
+names <- rep(NA, length(samples))
+for (file in 1:length(samples)){
+  names[file] <- str_sub(samples[file], 1, -23)
+}
+
+
+
+```
+
+```{r data_metrics}
+#Ensure paths are set for code:
+metrics_path <- file.path(projdir, outdir, "data_metrics/", fsep = "/")
+if (file.exists(metrics_path)){
+  cat("data_metrics directory path works!\n")
+} else {
+  cat("data_metrics directory does not exist - creating\n")
+  dir.create(metrics_path)
+  cat("data_metrics directory created:", file.exists(metrics_path), "\n")
+}
+
+#Determine total number of genes and total number of cells and writes info into a csv file
+totals <- dim(ss_data_scrubbed)
+names(totals) <- c("genes", "cells")
+print(totals)
+write.csv(totals, paste0(metrics_path, "total_genes&cells", suffix, ".csv"))
+rm(totals)
+
+```
+
+## Add meta data to objects
+```{r add MetaData}
+# Read in the meta data csv file
+meta_data <- read.csv(ss_csv, header = TRUE)
+
+# Split object by sample
+ss_data_split <- SplitObject(ss_data_scrubbed,
+                            split.by = "orig.ident")
+
+# Add MetaData to object
+for (sample in 1:length(ss_data_split)) {
+  for (variable in 1:ncol(meta_data)) {
+    var_name <- names(meta_data[variable])
+    ss_data_split[[sample]][[var_name]] <- meta_data[sample, variable]
+  }
+}
+
+# Recombine samples after adding meta data
+ss_data_scrubbed <- merge(ss_data_split[[1]], c(ss_data_split[[2]], 
+                          ss_data_split[[3]], ss_data_split[[4]], 
+                          ss_data_split[[5]], ss_data_split[[6]]))
+
+ss_data_scrubbed[["percent.mito"]] <- PercentageFeatureSet(object = ss_data_scrubbed, pattern = "^MT-")
+
+# Remove objects that are no longer needed
+rm(var_name, ss_data_split)
+```
+
+## Normalize using Seurat SCTransform
+```{r SCTransform, message=FALSE, warning=FALSE}
+#round counts to 2 digits
+counts <- formatC(ss_data_scrubbed@assays$RNA@counts@x,
+                  digits = 3,
+                  format = "fg",
+                  drop0trailing = TRUE)
+
+ss_data_scrubbed@assays$RNA@counts@x <- as.numeric(counts)
+
+#Split data into multiple chunks if too large to normalize at once
+if (length(samples) > 7) {
+  ss_data_scrubbed1 <- subset(x = ss_data_scrubbed,
+                           ident = c(samples[1:7]))
+  saveRDS(ss_data_scrubbed1, file = "seurat_ss_data_QCd_normalized", suffix, "1.rds")
+  rm(ss_data_scrubbed1)
+  ss_data_scrubbed2 <- subset(x = ss_data_scrubbed,
+                           ident = c(samples[8:length(samples)]))
+  rm(ss_data_scrubbed)
+  # Normalize read depth using SCTransformation
+  ss_data_scrubbed2 <- Seurat::SCTransform(ss_data_scrubbed2,
+                                           new.assay.name = assay,
+                                           variable.features.n = 5000,
+                                           do.scale = FALSE,
+                                           do.center = FALSE,
+                                           conserve.memory = TRUE,
+                                           return.only.var.genes = TRUE,
+                                           #vars.to.regress = "percent.mito",
+                                           verbose = FALSE)
+  saveRDS(ss_data_scrubbed2, file = "seurat_ss_data_QCd_normalized", suffix, "_2.rds")
+  rm(ss_data_scrubbed2)
+  ss_data_scrubbed1 <- readRDS("seurat_ss_data_QCd_normalized", suffix, "_1.rds")
+  ss_data_scrubbed1 <- Seurat::SCTransform(ss_data_scrubbed1,
+                                           new.assay.name = assay,
+                                           variable.features.n = 5000,
+                                           do.scale = FALSE,
+                                           do.center = FALSE,
+                                           conserve.memory = TRUE,
+                                           return.only.var.genes = TRUE,
+                                           #vars.to.regress = "percent.mito",
+                                           verbose = FALSE)
+  saveRDS(ss_data_scrubbed1, file = "seurat_ss_data_QCd_normalized", suffix, "_1.rds")
+  ss_data_scrubbed2 <- readRDS("seurat_ss_data_normalized", suffix, "_2.rds")
+  ss_data_scrubbed1 <- merge(ss_data_scrubbed1, ss_data_scrubbed2)
+  saveRDS(ss_data_scrubbed1, file = "seurat_ss_data_QCd_normalized", suffix, ".rds")
+} else {
+# Normalize read depth using SCTransformation
+ss_data_scrubbed <- Seurat::SCTransform(ss_data_scrubbed,
+                                        new.assay.name = assay,
+                                        variable.features.n = 5000,
+                                        do.scale = FALSE,
+                                        do.center = FALSE,
+                                        conserve.memory = TRUE,
+                                        return.only.var.genes = TRUE,
+                                        #vars.to.regress = unwanted,
+                                        verbose = FALSE)
+  saveRDS(ss_data_scrubbed, file = paste0( "seurat_ss_data_QCd_normalized", suffix, ".rds"))
+}
+
+```
+
+```{r Save_files}
+#Clean up data
+ss_data_norm <- ss_data_scrubbed
+rm(ss_data_scrubbed)
+
+#Save RData file with data and variables
+save.image(file = paste0("decon_scrubbed_thresholded_norm", suffix, "_ws.RData"), compress = TRUE)
+```
