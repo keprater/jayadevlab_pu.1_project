@@ -1,0 +1,8 @@
+*.gz
+*.csv
+*.xlsx
+*.png
+*.pdf
+*.rds
+.Rproj.user
+dnanexus/
