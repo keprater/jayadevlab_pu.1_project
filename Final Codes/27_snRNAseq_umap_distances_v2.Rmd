@@ -1,0 +1,315 @@
+---
+title: "27_snRNAseq_umap_distances_v2"
+author: "Katie Prater and Kevin Green"
+date: "04/20/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(data.table)
+library(pheatmap)
+library(ggplot2)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Generate the distance between centroids in the umap for each individual sample
+## in a dataset. Ideally this will allow us to determine which batch correction
+## method is most ideal for a given dataset.
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that has been clustered.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_15pcs_mg_only_refSCT_20210331.rdata" 
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.3"
+
+# Set the sample ID meta-data variable name
+ID <- "Pt_ID"
+
+# Variables in your metadata to group the distance numbers by (must match
+# variable names in metadata).
+meta_vars <- c("Study_Designation", "APOE_status", "Sex", "SeqBatch")
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# If sample_sub = TRUE: Name for your subset dataset"
+change_suffix <- NULL
+
+# Tell the script whether to overwrite your output files (Boolean)
+overwrite <- FALSE
+  
+    # If overwrite = FALSE say what the new output should be called. If TRUE,
+    # leave as NULL
+    write_name <- "refSCT"
+
+# Tell pheatmap whether you want a standard max/min and step size for the datasets. If not, leave NULL.
+breakslist <- NULL #seq(0, 4, by = 1)
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+Sys.umask("000")
+
+if (!is.null(change_output_path)) {
+  outpath <- change_output_path
+}
+
+if (!is.null(change_suffix)) {
+  print(paste0("Changing dataset name to:", change_suffix))
+  suffix <- change_suffix
+}
+
+#Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+metrics_path <- file.path(outpath, "data_metrics/", fsep = "")
+if (file.exists(metrics_path)) {
+  cat("Data metrics directory path works!")
+} else {
+  cat("Data metrics directory does not exist - creating")
+  dir.create(metrics_path)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+```
+
+## Collect and output data tables for the centroid of nuclei for each sample,
+## collected by different metadata variables.
+
+```{r Dataset_Cluster_Stats}
+# Make resolution name:
+res_name <- paste0(DefaultAssay(ss_data_norm), "_snn_res.", chose_resolution)
+
+# Set cluster identities in Seurat object
+Idents(object = ss_data_norm) <- res_name
+
+# Pull the names of the samples from the Seurat object
+idents_names <- unique(ss_data_norm[[ID]])[,1]
+
+# Calculate the coordinates of centroids for each sample based on UMAP embedding
+for (sample in 1:length(idents_names)) {
+  sub <- as.data.frame(ss_data_norm[[ID]])
+  sub <- rownames(filter(sub, eval(parse(text=ID)) == idents_names[sample]))
+  assign(paste0("sample_", sample),
+         Embeddings(subset(ss_data_norm, cells = sub)[["umap"]]))
+  assign(paste0("sample_", sample),
+         c(mean(get(paste0("sample_", sample))[,1]),
+           mean(mean(get(paste0("sample_", sample))[,2]))))
+}
+
+# Make a dataframe for the distance metrics to go into
+sample_dist <- data.frame(matrix(NA, nrow=length(idents_names),
+                                 ncol=length(idents_names)))
+rownames(sample_dist) <- idents_names
+colnames(sample_dist) <- idents_names
+
+# Make an array of the means of distances
+dist_means <- rep(NA, length(idents_names))
+
+# Calculate the distances between each sample and every other sample
+for (sample in 1:length(idents_names)) {
+  # put a zero in the cell for the sample itself
+  sample_dist[sample, sample] <- 0
+  
+  # calculate the distance between all other samples
+  for (num in 2:length(idents_names)) {
+    if (sample == 1) {
+      sample_dist[sample, num] <-
+        sqrt((get(paste0("sample_", sample))[1] -
+                get(paste0("sample_", num))[1])^2 +
+                (get(paste0("sample_", sample))[2] -
+                get(paste0("sample_", num))[2])^2)
+      sample_dist[num, sample] <-
+        sqrt((get(paste0("sample_", sample))[1] -
+                get(paste0("sample_", num))[1])^2 +
+                (get(paste0("sample_", sample))[2] -
+                get(paste0("sample_", num))[2])^2)
+      dist_means[sample] <- mean(as.numeric(sample_dist[sample,]))
+    } else {
+      sample_dist[sample, num] <-
+        sqrt((get(paste0("sample_", sample))[1] -
+                get(paste0("sample_", num))[1])^2 +
+                (get(paste0("sample_", sample))[2] -
+                get(paste0("sample_", num))[2])^2)
+      dist_means[sample] <- mean(as.numeric(sample_dist[sample,]))
+    }
+  }
+}
+
+sample_dist
+```
+## Write these tables to a CSV file.
+```{r Write_CSV}
+# Write a CSV with all the table output above to a file in the data metrics folder.
+if (overwrite){
+  write_csv(as.data.frame(sample_dist),
+      paste0(metrics_path, "sample_distance_matrix_", nPCs, "pcs_res.",
+             chose_resolution, suffix, ".csv"))
+} else {
+  write_csv(as.data.frame(sample_dist),
+      paste0(metrics_path, write_name, "_sample_distance_matrix_", nPCs,
+             "pcs_res.", chose_resolution, suffix, ".csv"))
+}
+```
+# Make calculations and plots of the distance matrix
+```{r calc_and_plot}
+# Make a simple heatmap of the distance grid to visualize the distance between samples
+plot1 <- pheatmap(sample_dist, main="Distance Between Samples",
+                  color=viridis::viridis(100), cluster_rows = FALSE,
+                  cluster_cols = FALSE)
+plot1
+if (overwrite) {
+  ggsave(filename = paste0(metrics_path, "sample_distance_heatmap_",
+                             chose_resolution, suffix,
+                             ".png"), height = 7, width = 11, plot = plot1)
+} else {
+  ggsave(filename = paste0(metrics_path, write_name,
+                           "_sample_distance_heatmap_",
+                             chose_resolution, suffix,
+                             ".png"), height = 7, width = 11, plot = plot1)
+}
+
+# Annotate the distance matrix with the metadata for these samples
+# Make the distance matrix a tibble for ease of using DPLYR
+sample_dist_tbl <- tibble(sample_dist)
+
+# Read in the metadata csv
+csv_path <- file.path(datapath, csv)
+meta_data_csv <- read_csv(csv_path)
+rownames(meta_data_csv) <- meta_data_csv[[ID]]
+
+# # Find the order of the metadata compared to the distance matrix
+# meta_order <- match(meta_data_csv[[ID]], str_sub(colnames(sample_dist_tbl), 2, 5))
+# 
+# # Ensure the metadata is sorted by the correct order.
+# sorted_meta_data_csv <- bind_cols(meta_data_csv, meta_order)
+# sorted_meta_data_csv <- sorted_meta_data_csv %>% arrange("* NA")
+# 
+# # Append the metadata to the distance matrix
+# dist_metadata <- bind_cols(sample_dist_tbl, sorted_meta_data_csv)
+
+# Make a heatmap utilizing the metadata information provided by the user
+for (meta_var in meta_vars) {
+  # Print which groups are being plotted
+  print(paste("Plotting heatmap for", meta_var))
+    
+  # # Sort the distance matrix by the metadata variable defined by user.
+  # dist_metadata <- dist_metadata %>% arrange(desc(meta_var))
+  sample_dist <- sample_dist[order(rownames(sample_dist)), order(colnames(sample_dist))]
+  
+  # Add metadata to sample distribution dataframe and sort by metadata variable
+  meta_data_df <- as.data.frame(as.factor(meta_data_csv[[meta_var]]))
+  meta_data_df$names <- meta_data_csv[[ID]]
+  meta_data_df <- meta_data_df %>% rowid_to_column("number") %>%
+                  column_to_rownames("names") %>%
+                  arrange(as.factor(meta_data_csv[[meta_var]]))
+  names(meta_data_df)[2] <- meta_var
+  sample_dist <- sample_dist[meta_data_df$number, meta_data_df$number]
+  
+  # Make a heatmap of the distance grid to visualize the distance between samples
+  if (!is.null(breakslist)) {
+    plot1 <- pheatmap(sample_dist, main="Distance Between Samples",
+                      annotation_col = meta_data_df[, 2, drop=F],
+                      annotation_names_col = FALSE,
+                      color=viridis::viridis(100),
+                      breaks = breakslist,
+                      cluster_rows = FALSE,
+                      cluster_cols = FALSE)
+    print(plot1)
+    if (overwrite) {
+      ggsave(filename = paste0(metrics_path, meta_var,
+                               "_sample_distance_heatmap_",
+                               chose_resolution, suffix,
+                               ".png"), height = 7, width = 11, plot = plot1)
+    } else {
+      ggsave(filename = paste0(metrics_path, write_name, "_", meta_var, 
+                               "_sample_distance_heatmap_",
+                               chose_resolution, suffix,
+                               ".png"), height = 7, width = 11, plot = plot1)
+    }
+  } else {
+    plot1 <- pheatmap(sample_dist, main="Distance Between Samples",
+                      annotation_col = meta_data_df[, 2, drop=F],
+                      annotation_names_col = FALSE,
+                      color=viridis::viridis(100), cluster_rows = FALSE,
+                      cluster_cols = FALSE)
+    print(plot1)
+    if (overwrite) {
+      ggsave(filename = paste0(metrics_path, meta_var,
+                               "_sample_distance_heatmap_",
+                               chose_resolution, suffix,
+                               ".png"), height = 7, width = 11, plot = plot1)
+    } else {
+      ggsave(filename = paste0(metrics_path, write_name, "_", meta_var, 
+                               "_sample_distance_heatmap_",
+                               chose_resolution, suffix,
+                               ".png"), height = 7, width = 11, plot = plot1)
+    }
+  }
+}
+
+# Calculate the overall distance metric for the dataset
+print("The overall distance for this dataset is:")
+mean(dist_means)
+
+```

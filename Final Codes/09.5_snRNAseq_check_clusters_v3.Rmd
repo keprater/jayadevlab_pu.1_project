@@ -1,0 +1,281 @@
+---
+title: "09.5_snRNAseq_check_clusters_v3"
+author: "Katie Prater based on code from Wei Sun"
+date: "02/03/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(dplyr)
+library(ggpointdensity)
+library(ggpubr)
+library(dplyr)
+library(pheatmap)
+theme_set(theme_bw())
+library(cluster)
+#library(bluster)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Checking cluster stability across multiple algorithms (or between splits of a single dataset)
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset(s) that needs to be checked.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Dataset type: 
+# DIFF_ALG = Checking different clustering algorithms (multiple rdata files)
+# DIFF_Batch = Checking different batch correction methods (multiple rdata files)
+# DATA_SPLIT = Checking the same algorithm across splits of a dataset (single
+# rdata file)
+data_type <- "DIFF_batch"
+
+# Algorithm(s)/Batch method(s) to test: (used to name files)
+# Examples: "orig_louvain", "louvain_multi", "leiden", "kmeans"
+# Examples: "refInt", "harmony", "MNN"
+# use c() if you are comparing two algorithms or batch methods
+# **Only a comparison of 2 is possible with this script
+alg_names <- c("MixedAPOE_cluster", "APOE33_cluster")
+
+# Rdata file name(s): (give the name(s) for the appopriate RDS/Rdata file)
+# Use c() if you are inputting more than 1 to test different algorithms. Make
+# sure they are in the same order as you listed the algorithms above.
+strt_data <- c("QCd_leiden_clustered_ws_20pcs_post-sub_no_ref.rdata", "QCd_leiden_clustered_ws_20pcs_no-ref_APOE33.rdata")
+
+# Resolutions to test:
+# If using Diff_ALG, can input as many resolutions as you'd like to test.
+# If using Diff_batch - input the two resolutions used in the order of the rdata
+# files above
+resolution <- c("0.3", "0.4")
+
+# Run orig_louvain clustering bootstrap to test cluster stability over multiple
+# rounds of clustering? (Boolean)
+boot_clust <- FALSE
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+
+# Load the Seurat object(s) saved before
+if (identical(data_type, "DATA_SPLIT")) {
+  print(paste('Loading data', strt_data, sep = " "))
+  load(paste0("../data/r_files/", strt_data))
+} else {
+  for (alg in 1:length(alg_names)) {
+      print(paste('Loading data for algorithm', alg_names[alg], ":",
+                  strt_data[alg], sep = " "))
+      load(paste0("../data/r_files/", strt_data[alg]))
+      assign(alg_names[alg], ss_data_norm)
+      rm(ss_data_norm)
+  }
+}
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+Sys.umask(mode = "007")
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Create output folder
+checkclust_path <- file.path(outpath, "umaps/check_clusters/", fsep = "/")
+if (file.exists(checkclust_path)) {
+  cat("parent directory path works!")
+} else {
+  cat("parent directory does not exist - creating")
+  dir.create(checkclust_path)
+}
+if (identical(data_type, "DATA_SPLIT")) {
+  checkclust_path <- file.path(outpath, "umaps/check_clusters", alg_names, "/",
+                          fsep = "/")
+  if (file.exists(checkclust_path)) {
+    cat("check plots directory path works!")
+  } else {
+    cat("check plots directory does not exist - creating")
+    dir.create(checkclust_path)
+  }
+} else {
+  folder_name <- paste0(alg_names[1], resolution[1], "_vs_", alg_names[2],
+                        resolution[2])
+  checkclust_path <- file.path(outpath, "umaps/check_clusters", folder_name,
+                               "/", fsep = "/")
+  if (file.exists(checkclust_path)) {
+    cat("parent directory path works!")
+  } else {
+    cat("parent directory does not exist - creating")
+    dir.create(checkclust_path)
+  }
+}
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(checkclust_path)))
+```
+
+## Compare the clusters either between algorithms or between splits of data to
+## determine consistency.
+```{r Check_Clusters}
+# Check which type of comparison is being done and then run appropriate version
+if (identical(data_type, "DATA_SPLIT")) {
+  print("Script doesn't support this analysis yet. Work in progress.")
+} else {
+  if (identical(data_type, "DIFF_ALG")) {
+    for (res in 1:length(resolution)) {
+    # Make a table that includes the cluster identities for all the nuclei to
+    # compare two algorithms
+    chose_resolution <- resolution[res]
+    res_name <- paste0(assay, "_snn_res.", chose_resolution)
+    # Pull data for algorithm 1
+    alg1_idents <- eval(str2expression(paste0(alg_names[1], "$", res_name)))
+  
+    # Pull data for algorithm 2
+    alg2_idents <- eval(str2expression(paste0(alg_names[2], "$", res_name)))
+  
+    tab = table(paste(alg_names[1], alg1_idents), 
+    paste(alg_names[2], alg2_idents))
+    tab
+
+    # Make a heatmap to compare the clusters
+    plot1 <- pheatmap(log10(tab+10), main=folder_name,
+                      color=viridis::viridis(100), cluster_rows = FALSE,
+                      cluster_cols = FALSE)
+    ggsave(filename = paste0(checkclust_path, "Cluster_algorithms_",
+                             folder_name, "_", chose_resolution, suffix,
+                             ".png"), height = 7, width = 11, plot = plot1)
+    }
+  } else {
+    # Make a table that includes the cluster identities for all the nuclei to
+    # compare two algorithms
+    res1_name <- paste0(DefaultAssay(get(alg_names[1])), "_snn_res.", resolution[1])
+    res2_name <- paste0(DefaultAssay(get(alg_names[2])), "_snn_res.", resolution[2])    
+    
+    # If the datasets are not the same size, determine which nuclei to subset
+    # out of the larger one
+    if (length(colnames(get(alg_names[1]))) !=
+        length(colnames(get(alg_names[2])))) {
+      print("The datasets are not the same size. Adjusting.")
+      assign(alg_names[1],
+             get(alg_names[1])[j = colnames(get(alg_names[2])@assays$RNA@counts)])
+      assign(alg_names[2],
+             get(alg_names[2])[j = colnames(get(alg_names[1])@assays$RNA@counts)])
+      
+      # Confirm that nuclei are the same
+      print(paste0("The nuclei in each dataset are now identical: ", 
+                   identical(colnames(get(alg_names[1])@assays$RNA@counts),
+                colnames(get(alg_names[2])@assays$RNA@counts))))
+
+    } else {
+      print("The datasets are the same size. Proceeding accordingly.")
+    }
+    
+    # Pull data for algorithm 1
+    alg1_idents <- eval(str2expression(paste0(alg_names[1], "$", res1_name)))
+  
+    # Pull data for algorithm 2
+    alg2_idents <- eval(str2expression(paste0(alg_names[2], "$", res2_name)))
+  
+    tab = table(paste(alg_names[1], alg1_idents), 
+    paste(alg_names[2], alg2_idents))
+    print(tab)
+
+    # Make a heatmap to compare the clusters
+    plot1 <- pheatmap(log10(tab+10), main=folder_name,
+                      color=viridis::viridis(100), cluster_rows = FALSE,
+                      cluster_cols = FALSE)
+    ggsave(filename = paste0(checkclust_path, "Cluster_algorithms_",
+                             folder_name, suffix,
+                             ".png"), height = 7, width = 11, plot = plot1)
+  }
+}
+
+```
+## Evaluating Cluster Stability
+High on-diagonal values indicate that the corresponding cluster remains coherent in the bootstrap replicates, while high off-diagonal values indicate that the corresponding pair of clusters are still separated in the replicates.
+```{r cluster_stability}
+if (boot_clust) {
+  # Bootstrap the clustering to assess how stable the clusters are
+  myClusterFUN <- function(x) {
+    g <- bluster::makeSNNGraph(x, type="jaccard")
+    igraph::cluster_louvain(g)$membership
+  }
+  
+  # myClusterFUN2 <- function(x) {
+  #     kmeans(x, centers=best_k)$cluster
+  # }
+  
+  # Extract principle components and run clustering functions
+  pcs <- Embeddings(alg_names[1], reduction = "pca")[,1:15]
+  orig_louvain = myClusterFUN(pcs)
+  #orig_kmeans  = myClusterFUN2(pcs)
+  
+  # # Find best k for k-means
+  # set.seed(110010101)
+  # gaps   = clusGap(pcs, kmeans, K.max=20)
+  # best_k = maxSE(gaps$Tab[(min_kmeans_k:20),"gap"], 
+  #                gaps$Tab[(min_kmeans_k:20),"SE.sim"]) + (min_kmeans_k-1)
+  
+  # Bootstrap the clustering to see if it's stable over time.
+  set.seed(0010010100)
+  ratios_louvain <- bootstrapStability(pcs, FUN=myClusterFUN, 
+                                       clusters=orig_louvain)
+  dim(ratios_louvain)
+  
+  # set.seed(0010010100)
+  # ratios_kmeans <- bootstrapStability(pcs, FUN=myClusterFUN2, 
+  #                                     clusters=orig_kmeans)
+  # dim(ratios_kmeans)
+  
+  # Plot the results
+  plot2 <- pheatmap(ratios_louvain, main="Louvain Bootstrap", cluster_row=FALSE,
+                    cluster_col=FALSE, color=viridis::magma(100), 
+                    breaks=seq(-1, 1, length.out=101))
+  ggsave(filename = paste0(checkclust_path,
+                           "Cluster_bootstrap_stability_orig_louvain_",
+                           chose_resolution, suffix, ".png"), height = 7,
+         width = 11, plot = plot2)
+  
+  # plot3 <- pheatmap(ratios_kmeans, main = "K-means Bootstrap", cluster_row=FALSE,
+  #                   cluster_col=FALSE, color=viridis::magma(100), 
+  #                   breaks=seq(-1, 1, length.out=101))
+  # ggsave(filename = paste0(checkclust_path, "Cluster_bootstrap_stability_kmeans_",
+  #                            chose_resolution, suffix, ".png"), height = 7,
+  #          width = 11, plot = plot3)
+  plot2
+  #plot3
+}
+
+```
+

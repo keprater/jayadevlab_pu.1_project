@@ -1,0 +1,206 @@
+---
+title: "32_single_nucleus_violin_v1"
+author: "Katie Prater and Kevin Green"
+date: "8/14/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Seurat)
+library(Matrix)
+library(patchwork)
+library(scales)
+library(ggplot2)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Detection of Differential genes by cluster
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset with cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_20pcs_post-sub_no_ref.rdata"
+
+# Did you use Leiden as your clustering algorithm? (boolean):
+leiden_alg <- TRUE
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.3"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Set the sample ID meta-data variable name
+ID <- "Pt_ID"
+
+# Set which clusters to remove
+remove <- c("11", "12")
+
+# Tell the script whether to overwrite your output files (Boolean)
+overwrite <- TRUE
+  
+  # If overwrite = FALSE say what the new output should be called. If TRUE,
+  # leave as NULL
+  write_name <- NULL #"vol_plot_test" #"with_gsea"
+
+# Set which assay will be analyzed. Seurat recommends using the normalized data
+# from the "RNA" assay.
+vln_assay <- "RNA"
+
+# Set the csv files containing the genes you wish to plot or provide a list
+# Please put the csv in the data folder of the project
+# gene_list <- unlist(read.csv("../data/boxplot_genes_20210621.csv"))
+gene_list <- c("ADAR", "IRF3", "IRF5", "IRF7", "MAVS", "CASP1", "P2RX7")
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("000")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+
+# First ensure that the idents are set to the resolution of clusters that you
+# want. Remake resolution name to ensure it's accurate:
+res_name <- paste0(assay, "_snn_res.", chose_resolution)
+  
+# Set cluster identities in Seurat object to the numbers from the resolution
+# you chose previously
+if (!exists("cluster_idents")){
+  Idents(object = ss_data_norm) <- res_name
+  cluster_idents <- sort(as.integer(unique(Idents(ss_data_norm))))
+} 
+
+
+# Change the active assay to the assay to be evaluated for DEG
+DefaultAssay(ss_data_norm) <- vln_assay
+
+# Normalize cells for read depth
+if (identical(vln_assay, "RNA")) {
+  ss_data_norm <- NormalizeData(ss_data_norm, assay = "RNA")
+}
+
+# Check if meta.data variables match gene names
+meta_data <- colnames(ss_data_norm@meta.data)
+all_genes <- row.names(ss_data_norm@assays$RNA@counts)
+while (any(meta_data %in% all_genes)) {
+  change <- meta_data[meta_data %in% all_genes][1]
+  warning(paste0("Changing the name of ", change, " metadata column to ",
+                 change, "_status"))
+  ss_data_norm@meta.data[[paste0(change, "_status")]] <- ss_data_norm@meta.data[[change]]
+  ss_data_norm@meta.data[[change]] <- NULL
+  meta_data <- colnames(ss_data_norm@meta.data)
+}
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+# Ensure paths are set for code:
+outpath <- change_path(outpath)
+# Set the file paths to DEG folder:
+DEG_path <- change_path(paste0(outpath, "DEG/"))
+vln_path <- change_path(paste0(DEG_path, "single_nucleus_vln_plots/"))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(DEG_path)))
+```
+
+```{r violin plots}
+# Reorder clusters
+columns <- 1:nlevels(ss_data_norm@active.ident)
+ss_data_norm@active.ident <- factor(ss_data_norm@active.ident,
+                                    levels = paste(columns))
+ss_data_norm@meta.data[[res_name]] <- factor(ss_data_norm@meta.data[[res_name]],
+                                             levels = paste(columns))
+colors <- hue_pal()(length(columns))
+
+# Remove any unwanted clusters
+if (!is.null(remove)) {
+  ss_data_norm <- SubsetData(ss_data_norm, ident.remove = remove)
+}
+
+for (gene in gene_list) {
+  vln_plot <- VlnPlot(ss_data_norm, features = gene, log = FALSE, cols = colors,
+                      split.by = res_name, pt.size = 0, slot = "data",
+                      combine = TRUE)
+  print(vln_plot)
+  if (overwrite){
+    ggsave(filename = paste0(vln_path, "vln_plot_", gene, "_res.",
+                             chose_resolution, suffix, ".pdf"),
+       height = 7, width = 11, plot = vln_plot)
+    ggsave(filename = paste0(vln_path, "vln_plot_", gene, "_res.",
+                             chose_resolution, suffix, ".png"),
+       height = 7, width = 11, plot = vln_plot)
+  } else {
+    ggsave(filename = paste0(vln_path, write_name, "vln_plot_", gene, "_res.",
+                             chose_resolution, "_", suffix, ".pdf"),
+       height = 7, width = 11, plot = vln_plot)
+    ggsave(filename = paste0(vln_path, write_name, "vln_plot_", gene, "_res.",
+                             chose_resolution, "_", suffix, ".png"),
+       height = 7, width = 11, plot = vln_plot)
+  }
+}
+```

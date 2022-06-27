@@ -1,0 +1,265 @@
+---
+title: "25_cluster_distribution_v1"
+author: "Katie Prater and Kevin Green"
+date: "03/01/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(data.table)
+library(SingleCellExperiment)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Output of numbers of nuclei for each cluster along with their proportions.
+## Statistically tests the proportions to determine if there are differences
+## between groups.
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that has been clustered.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_louvain_multi_clustered_ws_10pcs_no_ref_APOE33_clust1subset.rdata" 
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.45"
+
+# Set the sample ID meta-data variable name
+ID <- "Pt_ID"
+
+# Variables in your metadata to group the cluster numbers by (must match
+# variable names in metadata).
+meta_vars <- c("Study_Designation", "Sex", "SeqBatch",
+               "CognitiveStatus", "NIA_AA")
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# If sample_sub = TRUE: Name for your subset dataset"
+change_suffix <- NULL
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+Sys.umask("000")
+
+if (!is.null(change_output_path)) {
+  outpath <- change_output_path
+}
+
+if (!is.null(change_suffix)) {
+  print(paste0("Changing dataset name to:", change_suffix))
+  suffix <- change_suffix
+}
+
+#Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+metrics_path <- file.path(outpath, "data_metrics/", fsep = "")
+if (file.exists(metrics_path)) {
+  cat("Data metrics directory path works!")
+} else {
+  cat("Data metrics directory does not exist - creating")
+  dir.create(metrics_path)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+```
+
+## Collect and output data tables for the number of cells in each cluster,
+## collected by different metadata variables.
+
+```{r Prep_clusters}
+# Make resolution name:
+res_name <- paste0(assay, "_snn_res.", chose_resolution)
+
+# Set cluster identities in Seurat object
+Idents(object = ss_data_norm) <- res_name
+
+# Generate a table with the # nuclei per cluster
+overall <- table(Idents(ss_data_norm))
+print(paste("The number of nuclei in each cluster is:"))
+overall
+
+# Generate a table with the number of nuclei in each cluster split by sample
+clust_sample_table <- table(Idents(ss_data_norm), t(ss_data_norm[[ID]])) 
+print(paste0("The number of nuclei in each cluster split by sample is:"))
+clust_sample_table
+
+# Generate a table with the proportion of nuclei in each cluster
+prop_overall <- prop.table(table(Idents(ss_data_norm)))
+print(paste("The proportion of nuclei in each cluster is:"))
+prop_overall
+
+# Named vector of sample names
+sids <- purrr::set_names(levels(as.factor(ss_data_norm@meta.data[[ID]])))
+
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts <- ss_data_norm@assays$RNA@counts
+metadata <- ss_data_norm@meta.data
+
+# Set up metadata as desired for aggregation and DE analysis
+metadata$cluster_id <- factor(ss_data_norm@active.ident)
+
+# rm(ss_data_norm)
+
+# Create single cell experiment object
+sce <- SingleCellExperiment(assays = list(counts = counts), 
+                            colData = metadata)
+
+# Determine how to reorder the samples (rows) of the metadata to match the
+# order of sample names in sids vector
+reorder <- match(sids, sce[[ID]])
+
+# Create the sample level metadata by combining the reordered metadata with
+# the number of cells corresponding to each sample.
+metadata_df <- data.frame(colData(sce)[reorder, ], row.names = NULL) %>%
+               select(meta_vars) %>% t()
+clust_sample_table <- as.data.frame(t(rbind(metadata_df, clust_sample_table)))
+```
+
+```{r Cluster_distribution, warning=FALSE}
+# Generate a table with the number of nuclei in each cluster split by subset
+# variable
+tables <- as.data.frame(rep(NA, length(overall)))
+pair_chisq = function(i,j){
+  if (subset_table[num_row,i] == 0 & subset_table[num_row, j]==0) { 
+    as.double(NA)
+  } else {
+    prop.test(matrix(c(subset_table[num_row,i], subset_table[num_row,j]),
+                   nrow=1, byrow=FALSE), p = expected_table[num_row,i], 
+              correct = FALSE)$p.value  
+  }
+}
+for (group in 1:length(meta_vars)) {
+  subset_table <- NULL
+  expected_table <- NULL
+  totals_table <- as.data.frame(cbind(table(Idents(ss_data_norm), 
+                     t(ss_data_norm@meta.data[[meta_vars[group]]]))))
+  for (level in levels(as.factor(clust_sample_table[[meta_vars[group]]]))) {
+    observed <- totals_table[[level]] / overall *100
+    prop <- sum(as.data.frame(totals_table)[[level]]) / sum(overall)
+    expected <- NULL
+    for (avg in 1:length(observed)) {
+      expected <- rbind(expected, prop)
+    }
+    subset_table <- cbind(subset_table, cbind(observed))
+    expected_table <- cbind(expected_table, cbind(expected))
+  }
+  colnames(subset_table) <- levels(as.factor(clust_sample_table[[meta_vars[group]]]))
+  print(paste0("The number of nuclei in each cluster split by your metadata ",
+               "variables: ", meta_vars[group]))
+  print(subset_table)
+  print("The expected proportions are:")
+  print(expected_table[1,])
+  
+  # proportion_pval <- function(x, totals) {
+  #   p <- x[1] + x[2]
+  #   z <- (x[1] - x[2]) / sqrt(p * (1-p) * (1/totals[1] + 1/totals[2]))
+  #   return(pnorm(z))
+  # }
+  # 
+  # p_values <- NULL
+  # for (value in 1:nrow(subset_table)) {
+  #   p_values <- rbind(p_values,
+  #                     proportion_pval(subset_table[value,],
+  #                                     totals_table[value,]))
+  # }
+  # colnames(p_values) <- "p_values"
+  # print(p_values)
+  
+  # Perform a chi-squared test 
+  chisq <- chisq.test(subset_table, p = expected_table, correct = FALSE)
+  print(chisq)
+  
+  # Perform pairwise chi-square if your overall p-value is less than 0.05 as
+  # post-hoc tests
+  if (chisq$p.value < 0.05) {
+    print(paste0("The pairwise q-values (FDR corrected) of chi-square split by",
+                 " your metadata variables: ", meta_vars[group]))
+    p_values <- NULL
+    for (num_row in 1:nrow(subset_table)) {
+       print(paste0("Comparisons for cluster: ",
+                    rownames(subset_table)[num_row]))
+       print(pairwise.table(pair_chisq,
+                            colnames(subset_table),
+                            p.adjust.method="fdr"))
+      # test <- chisq.test(subset_table[num_row,],
+      #                    p = expected_table[num_row,],
+      #                    correct = FALSE)
+      # p_values[num_row] <- test$p.value
+    }
+    # subset_table <- as.data.frame(subset_table)
+    # subset_table$p_val <- p_values
+    # subset_table$p_adj <- p.adjust(p_values, method = "fdr")
+    # print(subset_table)
+  }
+  # names(tables)[ncol(tables)] <- meta_vars[group]
+  # tables <- cbind(tables, subset_table, rep(NA, nrow(subset_table)))
+}
+```
+## Write these tables to a CSV file.
+```{r Write_CSV}
+# Write a CSV with all the tables output above to a file in the data metrics folder.
+csv_name <- paste0(metrics_path,'Cluster_distribution', nPCs,
+                   "pcs_res.", chose_resolution, suffix,'.csv')
+write_csv(tables, csv_name)
+```

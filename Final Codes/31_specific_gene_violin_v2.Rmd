@@ -1,0 +1,253 @@
+---
+title: "31_specific_gene_violin_v2"
+author: "Kevin Green and Katie Prater"
+date: "3/9/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Matrix)
+library(Seurat)
+library(scater)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(magrittr)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(png)
+library(data.table)
+library(patchwork)
+library(ggbeeswarm)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Specific Gene Boxplots
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset from the pseudobulk analysis
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "pseudobulk_ws_no-ref_APOE33_AgeInt.rdata"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Set cluster name(s) that need to be analyzed
+clusters <- c(1,2,3,4,5,6,8,9)
+
+# Set the csv files containing the genes you wish to plot or provide a list
+# Please put the csv in the data folder of the project
+# gene_list <- unlist(read.csv("../data/boxplot_genes_20210611.csv"))
+gene_list <- c("CADM2") #c("IFITM3", "EIF2AK3", "HSPA5", "CD14", "NFKB1", "ATP13A3", 
+              # "ZNF143", "S100A8", "S100A9")
+
+# Set which linear model will be plotted
+effect <- "Study_DesignationAD"
+
+# Set the metadata variable to color the points by
+meta_var <- "Study_Designation"
+
+# Set the order of variables from the metadata variable above
+var_levels <- c("Ctrl", "AD")
+
+# Input which colors to use in the plots. Input as a list
+# (e.g. c("gray", "salmon")) or a color palette (e.g. brewer.pal(3, "Paired"))
+colors <- c("gray", "salmon")
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("007")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+outpath <- change_path(outpath)
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+# Set the DEG folder
+DEG_path <- change_path(paste0(outpath, "/DEG/pseudobulk_by_group/"))
+```
+
+``` {r Make_Plots}
+# Set plots path
+plots_path <- paste0(DEG_path, "plots/")
+box_path <- change_path(paste0(plots_path, "box_plots/"))
+
+# Compile fitted expression data with metadata variables
+fitted <- NULL
+for (cluster in 1:length(clusters)) {
+  # Get fitted values of the cluster
+  cluster_fit <- get(paste0("fitted_", clusters[cluster], "_", effect))
+  
+  # Subset the metadata
+  cluster_metadata <- metadata[which(metadata$cluster_id == clusters[cluster]), ]
+  
+  # Add metadata to fitted values
+  cluster_fit <- rbind(t(cluster_metadata$cluster_id),
+                       t(as.character(cluster_metadata$Pt_ID)), 
+                       t(as.character(cluster_metadata[[meta_var]])), cluster_fit)
+  
+  # Combine all clusters
+  fitted <- cbind(fitted, cluster_fit)
+}
+
+# Add rownames to the matrix that was just created.
+rownames(fitted)[1] <- "cluster"
+rownames(fitted)[2] <- "Sample_ID"
+rownames(fitted)[3] <- meta_var
+fitted <- t(fitted)
+fitted <- as.data.frame(fitted)
+if(!is.na(try(as.numeric(fitted$cluster[1])))) {
+  fitted <- fitted[order(as.numeric(fitted$cluster)),]
+}
+fitted$cluster <- factor(fitted$cluster, levels = clusters)
+fitted$Sample_ID <- factor(fitted$Sample_ID, levels = cluster_metadata$Pt_ID)
+fitted[[meta_var]] <- factor(fitted[[meta_var]], levels = var_levels)
+
+vln_plots <- NULL
+vln_plots_label <- NULL
+for (gene in 1:length(gene_list)) {
+  if (gene_list[[gene]] %in% colnames(fitted[,-1:-2])) {
+    fitted[[gene_list[[gene]]]] <-
+      as.numeric(fitted[[gene_list[[gene]]]])
+    for (cluster in 1:length(clusters)) {
+      cluster_fit <- fitted[fitted$cluster == clusters[cluster],]
+      # Regular violin plots
+      vln_plots[[cluster]] <- ggplot(cluster_fit,
+                                     aes_(x = as.name(meta_var),
+                                          y = as.name(gene_list[[gene]]),
+                                          fill = as.name(meta_var))) +
+                              geom_violin(trim = FALSE) +
+                              scale_fill_manual(values = colors) +
+                              geom_dotplot(binaxis='y', stackdir='center', dotsize=1, 
+                                           position=position_dodge(1)) + 
+                              # geom_jitter(width = 0.1, height = 0.1) +
+                              theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background = element_blank(),
+                                    axis.line = element_line(colour = "black"),
+                                    legend.position = "none") +
+                              ggtitle(paste0("cluster ", clusters[[cluster]]))
+      print(vln_plots[[cluster]])
+      ggsave(filename = paste0(box_path, "DEG_vln_plot_", clusters[cluster], "_",
+                               effect, "_", gene_list[[gene]], "_res.",
+                               chose_resolution, suffix, ".pdf"),
+             height = 7, width = 7, plot = vln_plots[[cluster]])
+      ggsave(filename = paste0(box_path, "DEG_vln_plot_", clusters[cluster], "_",
+                               effect, "_", gene_list[[gene]], "_res.",
+                               chose_resolution, suffix, ".png"),
+             height = 7, width = 7, plot = vln_plots[[cluster]])
+      
+      # Violin plots with dots labeled by individual
+      vln_plots_label[[cluster]] <- ggplot(cluster_fit,
+                                     aes_(x = as.name(meta_var),
+                                          y = as.name(gene_list[[gene]]), 
+                                          fill = as.name(meta_var))) +
+                              geom_violin(trim = FALSE) +
+                              scale_fill_manual(values = colors) +
+                        geom_dotplot(binaxis='y', stackdir='center', dotsize=1, 
+                                           position=position_dodge(1)) + #, fill = cluster_fit$Sample_ID) +
+                              geom_text(label=rownames(cluster_fit), 
+                                        nudge_x = 0.25, nudge_y = 0.25, 
+                                        check_overlap = T
+                                        ) + 
+        #geom_jitter(width = 0.1, height = 0.1, 
+                              #            aes(colour = factor(colnames(cluster_fit)))) + 
+                              ggtitle(paste0("cluster ", clusters[[cluster]])) +
+                              theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background = element_blank(),
+                                    axis.line = element_line(colour = "black")) #,
+                                    # legend.position = "right")
+      print(vln_plots_label[[cluster]])
+      ggsave(filename = paste0(box_path, "DEG_vln_plot_labelDots", 
+                               clusters[cluster], "_",
+                               effect, "_", gene_list[[gene]], "_res.",
+                               chose_resolution, suffix, ".pdf"),
+             height = 7, width = 7, plot = vln_plots_label[[cluster]])
+      ggsave(filename = paste0(box_path, "DEG_vln_plot_labelDots", 
+                               clusters[cluster], "_",
+                               effect, "_", gene_list[[gene]], "_res.",
+                               chose_resolution, suffix, ".png"),
+             height = 7, width = 7, plot = vln_plots_label[[cluster]])
+    }
+   ## Doesn't currently function properly
+     # wrapped_plot <- wrap_plots(box_plots) +
+    #                 plot_annotation(title = gene_list[[gene]])
+    # print(wrapped_plot)
+    # ggsave(filename = paste0(box_path, "DEG_box_plots_",
+    #                          effect, "_", gene_list[[gene]], "_res.",
+    #                          chose_resolution, suffix, ".pdf"),
+    #        height = 7, width = 11, plot = box_plots[[gene]])
+    # ggsave(filename = paste0(box_path, "DEG_box_plots_",
+    #                          effect, "_", gene_list[[gene]], "_res.",
+    #                          chose_resolution, suffix, ".png"),
+    #        height = 7, width = 11, plot = box_plots[[gene]])
+  }
+}
+```

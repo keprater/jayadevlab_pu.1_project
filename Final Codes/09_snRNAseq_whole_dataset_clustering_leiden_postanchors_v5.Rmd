@@ -1,0 +1,273 @@
+---
+title: "09_snRNAseq_whole_dataset_clustering_leiden_postanchors_v5"
+author: "Katie Prater and Kevin Green"
+date: "10/06/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+use_condaenv("/gscratch/jayadevlab/software/conda/envs/miniconda_setup")
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(dplyr)
+library(leiden)
+library(leidenbase)
+library(stringr)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+### Clustering using the Leiden algorithm
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that needs to be clustered.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_norm_anchored_cca__ws_no_ref_APOE33_clust1subset.rdata"
+
+# Define the number of genes you want after variable gene detection:
+nfeatures <- 5000
+
+# Define the cell type
+cell_type <- "nuclei"
+
+# Set the number of PCs to use. Enter an integer > 0
+change_nPCs <- 20
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL #"../output/output_post-sub_no_7/"
+
+# Change the suffix, if necessary
+change_suffix <- NULL #"_post-sub_no_7-2"
+
+# Set the resolutions to be tested
+change_res <- c(0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7)
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+
+# Set reduction matrix
+red <- na.omit(tolower(str_extract(start_data, c("harmony", "MNN", "anchored"))))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+Sys.umask(mode = "007")
+
+if (!is.null(change_suffix)) {
+  suffix <- change_suffix
+}
+
+if (!is.null(change_res)) {
+  res <- change_res
+}
+rm(change_res)
+
+nPCs <- change_nPCs
+rm(change_nPCs)
+
+set.seed(42)
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Create change paths function
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+if (!is.null(change_output_path)) {
+  outpath <- change_path(change_output_path)
+}
+
+# Create output UMAPs folder
+umaps_path <- change_path(paste0(outpath, "umaps/"))
+umaps_path <- change_path(paste0(umaps_path, "leiden_clust/"))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(umaps_path)))
+```
+
+## Transition the data from the name it was given to the one that the code uses.
+```{r Dataset_Naming}
+# Check for whether the variable dataset_name exists. If it does, rename the
+# Seurat object with that name to a new object with the name ss_data_norm, the
+# standard for our code.
+if (exists("dataset_name")){
+  #Rename data to match rest of code
+  ss_data_norm <- get(dataset_name)
+  rm(list = dataset_name)
+  
+  #Change suffix so that files are different from previous runs
+  suffix <- paste0("_", dataset_name, suffix)
+  rm(dataset_name)
+}
+```
+## Generate UMAP for dataset
+```{r Cluster}
+# Define the assay name to use ("integrated" or "SCT")
+if (!is.null(ss_data_norm@assays$integrated)) {
+  assay <- "integrated"
+} else {
+  assay <- "SCT"
+}
+
+if (red == "anchored") {
+  red <- "pca"
+}
+
+# Find Nearest Neighbors
+print(paste("Finding nearest neighbors", Sys.time()))
+ss_data_norm <- FindNeighbors(ss_data_norm,
+                              reduction = red,
+                              dims = 1:nPCs,
+                              assay = assay,
+                              verbose = TRUE)
+
+# Find clusters
+print(paste("Finding clusters", Sys.time()))
+ss_data_norm <- FindClusters(ss_data_norm,
+                         resolution = res,
+                         algorithm = 4, # 4 = Leiden algorithm
+                         method = "igraph",
+                         weights = T) 
+
+resolutions <- paste0(assay, "_snn_res.", res)
+
+umap_pngs <- paste0("UMAP_", res)
+
+# Identify clusters:
+print(paste("Making UMAP clusters", Sys.time()))
+ss_data_norm <- RunUMAP(ss_data_norm,
+                        reduction = red,
+                        assay = assay,
+                        dims = 1:nPCs)
+
+# Plot clusters
+plot_clusters <- function(data, resolutions, label) {
+  for (resolution in 1:length(resolutions)) {
+    plot2 <- DimPlot(object = data,
+                     reduction = "umap",
+                     group.by = resolutions[[resolution]],
+                     pt.size = 1,
+                     label = TRUE,
+                     label.size = 10)
+    plot2 <- plot2 + ggtitle(resolutions[[resolution]])
+    print(plot2)
+    ggsave(filename = paste0(umaps_path, proj, "_PCs_", nPCs, "_",
+                             umap_pngs[[resolution]], suffix, ".png"),
+           height = 7, width = 11, plot = plot2)
+    ggsave(filename = paste0(umaps_path, proj, "_PCs_", nPCs, "_",
+                             umap_pngs[[resolution]], suffix, ".svg"),
+           height = 7, width = 11, plot = plot2)
+  }
+}
+
+plot_clusters(ss_data_norm, resolutions, "postQC_anchored")
+```
+
+## Plot the overlap of cells by sample to get a sense of their density. This can
+## help choose an accurate cluster resolution.
+```{r Density_Plot}
+# Make a UMAP plot of the clusters split by sample and overlaid to create a
+# density view.
+color_list <- rep("grey", length(samples))
+plot3 <- DimPlot(object = ss_data_norm,
+                 reduction = "umap",
+                 group.by = "orig.ident",
+                 cols = color_list,    
+                 pt.size = 0.1,
+                 label = FALSE,
+                 label.size = 10) + NoLegend()
+    plot3[[1]]$layers[[1]]$aes_params$alpha = .2
+ggsave(filename = paste0(umaps_path, cell_type, "_", nPCs, "_pcs_density_umap_", 
+                         suffix, ".png"),
+       height = 7, width = 11, plot = plot3)
+
+## Alternate Density plot Code:
+# Establishing groups to color plots by - don't need this for now.
+# group_by <- c("Dx", "Pt_ID")
+# Getting coordinates for cells to use for UMAP and associated grouping variable
+# information
+class_umap_data <- FetchData(ss_data_norm,
+                             vars = c("ident", "UMAP_1", "UMAP_2")) #, group_by))
+den_plot <- ggplot(data = class_umap_data, aes(x = UMAP_1, y = UMAP_2)) +
+            geom_point(alpha = 0.25, size = 0.01) +
+            geom_density2d(colour = "red")
+print(den_plot)
+ggsave(filename = paste0(umaps_path, cell_type, "_density_umap_red_lines",
+                         suffix, ".png"), height = 7, width = 11, plot = den_plot)
+
+
+den_plot <- ggplot(data = class_umap_data, aes(x = UMAP_1, y = UMAP_2)) +
+            geom_point(alpha = 0.25, size = 0.01) +
+            stat_density_2d(geom = "polygon", contour = TRUE,
+                            aes(fill = after_stat(level)),
+                            bins = 10, alpha=0.25) + 
+  scale_fill_distiller(palette = "Blues", direction = 1) +
+  geom_density2d(colour = "black")
+print(den_plot)
+ggsave(filename = paste0(umaps_path, cell_type, "_", nPCs,
+                         "_pcs_density_umap_blue_fill", suffix, ".png"),
+       height = 7, width = 11, plot = den_plot)
+
+# Create doublet score plot
+plot4 <- FeaturePlot(ss_data_norm, features = "Dub_scores")
+print(plot4)
+ggsave(filename = paste0(umaps_path, cell_type, "_", nPCs, "_pcs_doublet_scores",
+                         suffix, ".png"), height = 7, width = 11, plot = plot4)
+```
+
+## Save the data files.
+```{r Save_Files}
+rm(plot1, plot2, den_plot, color_list, plot3, plot4, resolutions, umap_pngs,
+   PCs, class_umap_data, reduction, change_suffix, change_output_path, ninety,
+   ninety_five, change_nPCs, change_resolution, params, res)
+# Save workspace image if needed to revisit
+save.image(file = paste0(rfiles_path, "QCd_leiden_clustered_ws_", nPCs, "pcs",
+                         suffix, ".rdata"), compress = TRUE)
+```
+

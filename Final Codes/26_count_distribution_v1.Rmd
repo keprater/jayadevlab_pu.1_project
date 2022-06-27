@@ -1,0 +1,154 @@
+---
+title: "26_count_distibution_v1"
+author: "Katie Prater and Kevin Green"
+date: "03/01/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: "6.3"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Output of numbers of nuclei for each cluster along with their proportions.
+## Statistically tests the proportions to determine if there are differences
+## between groups.
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that has been clustered.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_15pcs_mg_only_refSCT_20210331.rdata" 
+
+# Set the sample ID meta-data variable name
+x_var <- "orig.ident"
+
+# Set the meta-data variable name by which to color the samples
+color_var <- "Study_Designation"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# If sample_sub = TRUE: Name for your subset dataset"
+change_suffix <- NULL
+
+# Set the genes of interest to explore
+genes_of_interest <- c("P2RY12", "CX3CR1", "C3", "APOE", "RPS14", "RPL4", "TREM2")
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+Sys.umask("000")
+
+if (!is.null(change_output_path)) {
+  outpath <- change_output_path
+}
+
+if (!is.null(change_suffix)) {
+  print(paste0("Changing dataset name to:", change_suffix))
+  suffix <- change_suffix
+}
+
+# Check if meta.data variables match gene names
+meta_data <- colnames(ss_data_norm@meta.data)
+all_genes <- row.names(ss_data_norm@assays$RNA@counts)
+while (any(meta_data %in% all_genes)) {
+  change <- meta_data[meta_data %in% all_genes][1]
+  warning(paste0("Changing the name of ", change, " metadata column to ",
+                 change, "_status"))
+  ss_data_norm@meta.data[[paste0(change, "_status")]] <- ss_data_norm@meta.data[[change]]
+  ss_data_norm@meta.data[[change]] <- NULL
+  meta_data <- colnames(ss_data_norm@meta.data)
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+metrics_path <- file.path(outpath, "data_metrics/", fsep = "")
+if (file.exists(metrics_path)) {
+  cat("Data metrics directory path works!")
+} else {
+  cat("Data metrics directory does not exist - creating")
+  dir.create(metrics_path)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+```
+
+## Collect and output data tables for the number of cells in each cluster,
+## collected by different metadata variables.
+
+```{r Dataset_gene_Stats}
+# Create box-plots number of counts and genes of interest
+n_count <- paste0("nCount_", assay)
+gene_data <- FetchData(ss_data_norm,
+                       vars = c(x_var, "Study_Designation", n_count,
+                                genes_of_interest))
+count_plot <- ggplot(gene_data, aes_string(x = x_var, y = n_count,
+                                           color = color_var)) +
+              geom_boxplot() +
+              scale_color_manual(values = c("gray", "salmon")) +
+              theme_bw(base_size=12, base_line_size = 0, base_rect_size = 0)
+              # geom_jitter(aes(alpha=0.1), shape=16, position=position_jitter(0.2))
+print(count_plot)
+for (gene in genes_of_interest) {
+  gene_plot <- ggplot(gene_data, aes_string(x = x_var, y = gene,
+                                           color = color_var)) +
+              geom_boxplot() +
+              scale_color_manual(values = c("gray", "salmon")) +
+              theme_bw(base_size=12, base_line_size = 0, base_rect_size = 0)
+  print(gene_plot)
+}
+```

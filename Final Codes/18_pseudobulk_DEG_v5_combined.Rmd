@@ -1,0 +1,1041 @@
+---
+title: "18_pseudobulk_DEG_v5"
+author: "Katie Prater and Kevin Green"
+date: "8/14/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Seurat)
+library(Matrix)
+library(scater)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(magrittr)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(apeglm)
+library(png)
+library(DESeq2)
+library(RColorBrewer)
+library(data.table)
+library(patchwork)
+library(clusterProfiler)
+library(ggrepel)
+library(fgsea)
+library(BiocParallel)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Detection of Differential genes by pseudobulk analysis
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset with cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_20pcs_no-ref_no_s6868.rdata"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Set the sample ID meta-data variable name
+ID <- "Pt_ID"
+
+# Change the metadata csv file, if necessary
+change_csv <- NULL
+
+# Set variables from metadata on which to perform DEG (must match variable names
+# in metadata exactly). All other variables given will be regressed out before
+# testing each variable. For this reason, use caution when adding many when the
+# sample size is small.
+meta_vars <- c("Study_Designation", "Sex")
+
+# Set the reference value of the each meta_var (e.g. "Ctrl")
+ref <- c("Ctrl", "M")
+
+# Set cluster names that need to be removed from analysis
+remove <- NULL
+  
+# Input any metadata variables for discrete groups that are set as integers
+# (e.g. mutation status = 0 or 1). Otherwise, NULL
+meta_factors <- NULL
+
+# Choose the minimum fold change of a gene, in either group being tested, for
+# the gene to be tested. Fold change is expressed as log base 2.
+# (0.585 ~ 1.5 increase, 0.322 ~ 1.25 increase)
+log2_threshold <- 0.585
+
+# Input which colors to use in the plots. Input as a list
+# (e.g. c("gray", "salmon")) or a color palette (e.g. brewer.pal(3, "Paired"))
+colors <- c("gray", "salmon")
+
+# Which method for GSEA do you wish to use? Use "wald" for the Wald statistic,
+# "lfc" for the shrunken log2 fold change, "-log10p" for the
+# -log10(p-value), or NULL to perform no GSEA.
+method <- "wald"
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.2"
+
+# Set which clusters should be combined. If no clusters are to be combined, set
+# to NULL. 
+# IF NOT NULL, THIS WILL RUN ONLY THE COMBINED CLUSTERS
+combined <- c("1", "2", "3", "4", "5", "6", "7", "8", "9")
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+#meta_vars <- c("Study_Designation", "Sex")
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("000")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+# Change metadata csv if a new one is provided.
+if (!is.null(change_csv)) {
+  print("Changing metadata csv")
+  ss_csv <- change_csv
+}
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+  
+  # First ensure that the idents are set to the resolution of clusters that you
+  # want. Remake resolution name to ensure it's accurate:
+  res_name <- paste0(assay, "_snn_res.", chose_resolution)
+  
+  Idents(object = ss_data_norm) <- res_name
+}
+
+# Check if meta.data variables match gene names
+meta_data <- colnames(ss_data_norm@meta.data)
+all_genes <- row.names(ss_data_norm@assays$RNA@counts)
+while (any(meta_data %in% all_genes)) {
+  change <- meta_data[meta_data %in% all_genes][1]
+  warning(paste0("Changing the name of ", change, " metadata column to ",
+                 change, "_status"))
+  ss_data_norm@meta.data[[paste0(change, "_status")]] <- ss_data_norm@meta.data[[change]]
+  ss_data_norm@meta.data[[change]] <- NULL
+  meta_data <- colnames(ss_data_norm@meta.data)
+}
+
+# Change the active assay to the assay to be evaluated for DEG
+DefaultAssay(ss_data_norm) <- "RNA"
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+# Set the file paths to DEG folder:
+DEG_path <- paste0(outpath, "/DEG/")
+
+# Confirm sample directory exists.
+if (file.exists(DEG_path)) {
+  cat("DEG directory path works!\n")
+} else {
+  cat("DEG directory does not exist - creating\n")
+  dir.create(DEG_path)
+}
+```
+
+```{r aggregate_single_cells}
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+bulk_path <- change_path(paste0(outpath, "/DEG/pseudobulk_by_group/"))
+plots_path <- change_path(paste0(bulk_path, "plots/"))
+
+# Set random seed for reproducibility
+set.seed(42)
+
+# Remove any unwanted clusters
+ss_data_norm <- SubsetData(ss_data_norm, ident.remove = remove)
+
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts <- ss_data_norm@assays$RNA@counts
+metadata <- ss_data_norm@meta.data
+
+# Set the minimum number of nuclei that must express a gene for the gene to be
+# included in DEG analysis
+min_nuclei <- min(table(Idents(ss_data_norm)))
+
+# Set up metadata as desired for aggregation and DE analysis
+if (!is.null(combined)) {
+  # Combine clusters if necessary
+  metadata$cluster_id[!is.null(metadata[1])] <-
+    as.vector(paste(combined, collapse = "-"))
+} else {
+  metadata$cluster_id <- factor(ss_data_norm@active.ident)
+}
+rm(ss_data_norm)
+
+# Create single cell experiment object
+sce <- SingleCellExperiment(assays = list(counts = counts), 
+                            colData = metadata)
+
+# Identify groups for aggregation of counts
+groups <- colData(sce)[, c("cluster_id", ID)]
+
+if (!is.null(combined)) {
+  # Combine clusters if necessary
+  kids <- c(paste(combined, collapse = "-"))
+} else {
+  # Named vector of cluster names
+  kids <- purrr::set_names(levels(sce$cluster_id))
+}
+
+# Named vector of sample names
+sids <- purrr::set_names(levels(as.factor(sce[[ID]])))
+
+# Turn named vector into a numeric vector of number of cells per sample
+n_cells <- as.numeric(table(sce[[ID]]))
+
+# Determine how to reorder the samples (rows) of the metadata to match the
+# order of sample names in sids vector
+reorder <- match(sids, sce[[ID]])
+
+# Create the sample level metadata by combining the reordered metadata with
+# the number of cells corresponding to each sample.
+metadata_df <- 
+  data.frame(colData(sce)[reorder, ], n_cells, row.names = NULL) %>%
+    dplyr::select(-"cluster_id")
+csv_metadata <- read.csv(paste0(datapath, ss_csv))
+metadata_df <- cbind(metadata_df,
+                     csv_metadata[,!(colnames(csv_metadata) %in% 
+                                       colnames(metadata_df))])
+
+# Remove lowly expressed genes which have less than 20% of cells with any counts
+sce <- sce[rowSums(counts(sce) > 1) >= min_nuclei, ]
+
+# Aggregate across cluster-sample groups
+aggregate <- aggregate.Matrix(t(counts(sce)), 
+                              groupings = groups, fun = "sum") 
+
+# Not every cluster is present in all samples; create a vector that represents
+# how to split samples
+splitf <- sapply(stringr::str_split(rownames(aggregate),
+                                    pattern = "_",
+                                    n = 2), `[`, 1)
+
+# Turn into a list and split the list into components for each cluster and
+# transform, so rows are genes and columns are samples and make rownames as
+# the sample IDs
+aggregate <- split.data.frame(aggregate, factor(splitf)) %>%
+             lapply(function(u)
+                    set_colnames(t(u),
+                                 stringr::str_extract(rownames(u),
+                                                    "(?<=_)[:alnum:]+")))
+
+# Print out the table of cells in each cluster-sample group
+options(width = 100)
+print(table(sce$cluster_id, sce[[ID]]))
+
+# Get sample names for each of the cell type clusters
+# prepare data.frame for plotting
+get_sample_ids <- function(x){
+                    aggregate[[x]] %>% colnames()
+}
+de_samples <- map(1:length(kids), get_sample_ids) %>% unlist()
+
+# Get cluster IDs for each of the samples
+samples_list <- map(1:length(kids), get_sample_ids)
+get_cluster_ids <- function(x){
+                     rep(names(aggregate)[x], each = length(samples_list[[x]]))
+}
+de_cluster_ids <- map(1:length(kids), get_cluster_ids) %>% unlist()
+
+# Create a data frame with the sample IDs, cluster IDs and conditions
+gg_df <- data.frame(cluster_id = de_cluster_ids,
+                    sample_id = as.integer(de_samples))
+names(gg_df)[2] <- ID
+gg_df <- left_join(gg_df, metadata_df[, c(ID, meta_vars)])
+metadata <- gg_df %>% dplyr::select(cluster_id, ID, all_of(meta_vars))
+print(metadata)
+
+# Convert integer values to factors
+for (group in meta_factors) {
+  if (typeof(metadata[[group]]) == "integer") {
+    for (sample in 1:length(sids)) {
+      metadata[[group]][[sample]] <-
+        toString(metadata[[group]][[sample]])
+    }
+  }
+}
+
+for (meta_var in 1:length(meta_vars)) {
+  metadata[[meta_vars[meta_var]]] <- as.factor(metadata[[meta_vars[meta_var]]])
+  metadata[[meta_vars[meta_var]]] <- relevel(metadata[[meta_vars[meta_var]]],
+                                             ref = ref[meta_var])
+}
+```
+```{r create_user_GSEA}
+# Create user_GSEA function. This function is the same as clusterProfiler::GSEA
+# except it uses a fixed seed for reproducibility
+user_GSEA <- function (geneList, exponent = 1, minGSSize = 10, maxGSSize = 500, 
+                       eps = 0, pvalueCutoff = 0.05, pAdjustMethod = "BH",
+                       TERM2GENE, TERM2NAME = NA, verbose = TRUE, seed = TRUE,
+                       by = "fgsea", ...) {
+ USER_DATA <- build_Anno(TERM2GENE, TERM2NAME)
+ user_GSEA_internal(geneList = geneList, exponent = exponent,
+                    minGSSize = minGSSize, maxGSSize = maxGSSize, eps = eps,
+                    pvalueCutoff = pvalueCutoff, pAdjustMethod = pAdjustMethod,
+                    verbose = verbose, USER_DATA = USER_DATA, seed = seed,
+                    by = by, ...)
+}
+
+user_GSEA_internal <- function (geneList, exponent, minGSSize, maxGSSize, eps,
+                                pvalueCutoff, pAdjustMethod, verbose, seed,
+                                USER_DATA, by = "fgsea", ...) {
+ by <- match.arg(by, c("fgsea", "DOSE"))
+ if (by == "fgsea") {
+     .GSEA <- user_fgsea
+ }
+ else {
+     .GSEA <- GSEA_DOSE
+ }
+ res <- .GSEA(geneList = geneList, exponent = exponent, minGSSize = minGSSize, 
+              maxGSSize = maxGSSize, eps = eps, pvalueCutoff = pvalueCutoff, 
+              pAdjustMethod = pAdjustMethod, verbose = verbose, seed = TRUE, 
+              USER_DATA = USER_DATA, ...)
+ res@organism <- "UNKNOWN"
+  res@setType <- "UNKNOWN"
+  res@keytype <- "UNKNOWN"
+  return(res)
+}
+
+build_Anno <- getAnywhere(build_Anno)[["objs"]][[1]]
+
+user_fgsea <- function (geneList, exponent, nPerm, minGSSize, maxGSSize, eps, 
+    pvalueCutoff, pAdjustMethod, verbose, seed = TRUE, USER_DATA) 
+{
+    if (verbose) 
+        message("preparing geneSet collections...")
+    geneSets <- get("PATHID2EXTID", envir = USER_DATA)
+    if (all(!names(geneList) %in% unique(unlist(geneSets)))) {
+      sg <- unlist(geneSets[1:10])
+      sg <- sample(sg, min(length(sg), 6))
+      message("--> Expected input gene ID: ", paste0(sg, collapse = ","))
+      stop("--> No gene can be mapped....")
+    }
+    if (verbose) 
+        message("GSEA analysis...")
+    if (missing(nPerm)) {
+        tmp_res <- fgsea(pathways = geneSets, stats = geneList, 
+            minSize = minGSSize, maxSize = maxGSSize, eps = eps, 
+            gseaParam = exponent, nproc = 0)
+    }
+    else {
+        warning("We do not recommend using nPerm parameter in", 
+            "current and future releases")
+        tmp_res <- fgsea(pathways = geneSets, stats = geneList, 
+            nperm = nPerm, minSize = minGSSize, maxSize = maxGSSize, 
+            gseaParam = exponent, nproc = 0)
+    }
+    p.adj <- p.adjust(tmp_res$pval, method = pAdjustMethod)
+    qvalues <- calculate_qvalue(tmp_res$pval)
+    Description <- TERM2NAME(tmp_res$pathway, USER_DATA)
+    if (missing(nPerm)) {
+        params <- list(pvalueCutoff = pvalueCutoff, eps = eps, 
+            pAdjustMethod = pAdjustMethod, exponent = exponent, 
+            minGSSize = minGSSize, maxGSSize = maxGSSize)
+    }
+    else {
+        params <- list(pvalueCutoff = pvalueCutoff, nPerm = nPerm, 
+            pAdjustMethod = pAdjustMethod, exponent = exponent, 
+            minGSSize = minGSSize, maxGSSize = maxGSSize)
+    }
+    res <- data.frame(ID = as.character(tmp_res$pathway), Description = unname(Description), 
+        setSize = tmp_res$size, enrichmentScore = tmp_res$ES, 
+        NES = tmp_res$NES, pvalue = tmp_res$pval, p.adjust = p.adj, 
+        qvalues = qvalues, stringsAsFactors = FALSE)
+    res <- res[!is.na(res$pvalue), ]
+    res <- res[res$pvalue <= pvalueCutoff, ]
+    res <- res[res$p.adjust <= pvalueCutoff, ]
+    idx <- order(res$pvalue, decreasing = FALSE)
+    res <- res[idx, ]
+    if (nrow(res) == 0) {
+        message("no term enriched under specific pvalueCutoff...")
+        return(new("gseaResult", result = res, geneSets = geneSets, 
+            geneList = geneList, params = params, readable = FALSE))
+    }
+    row.names(res) <- res$ID
+    observed_info <- lapply(geneSets[res$ID], function(gs) gseaScores(geneSet = gs, 
+        geneList = geneList, exponent = exponent))
+    if (verbose) 
+        message("leading edge analysis...")
+    ledge <- leading_edge(observed_info)
+    res$rank <- ledge$rank
+    res$leading_edge <- ledge$leading_edge
+    res$core_enrichment <- sapply(ledge$core_enrichment, paste0, 
+        collapse = "/")
+    if (verbose) 
+        message("done...")
+    new("gseaResult", result = res, geneSets = geneSets, geneList = geneList, 
+        params = params, readable = FALSE)
+}
+
+calculate_qvalue <- getAnywhere(calculate_qvalue)[["objs"]][[1]]
+TERM2NAME <- getAnywhere(TERM2NAME)[["objs"]][[1]]
+gseaScores <- getAnywhere(gseaScores)[["objs"]][[1]]
+leading_edge <- getAnywhere(leading_edge)[["objs"]][[1]]
+
+fgsea <- function (pathways, stats, sampleSize = 101, minSize = 1, maxSize = Inf, 
+  eps = eps, scoreType = c("std", "pos", "neg"), nproc = 0, 
+  gseaParam = 1, BPPARAM = NULL, absEps = NULL) 
+{
+  scoreType <- match.arg(scoreType)
+  pp <- preparePathwaysAndStats(pathways, stats, minSize, maxSize, 
+      gseaParam, scoreType)
+  pathwaysFiltered <- pp$filtered
+  pathwaysSizes <- pp$sizes
+  stats <- pp$stats
+  m <- length(pathwaysFiltered)
+  if (m == 0) {
+      return(data.table(pathway = character(), pval = numeric(), 
+          padj = numeric(), log2err = numeric(), ES = numeric(), 
+          NES = numeric(), size = integer(), leadingEdge = list()))
+  }
+  if (!is.null(absEps)) {
+      warning("You are using deprecated argument `absEps`. ", 
+          "Use `eps` argument instead. ", "`absEps` was assigned to `eps`.")
+      eps <- absEps
+  }
+  if (sampleSize < 3) {
+      warning("sampleSize is too small, so sampleSize = 3 is set.")
+      sampleSize <- max(3, sampleSize)
+  }
+  log2err = nMoreExtreme = pathway = pval = padj = NULL
+  nLeZero = nGeZero = leZeroMean = geZeroMean = nLeEs = nGeEs = isCpGeHalf = NULL
+  ES = NES = size = leadingEdge = NULL
+  . = "damn notes"
+  nPermSimple <- 1000
+  minSize <- max(minSize, 1)
+  eps <- max(0, min(1, eps))
+  if (sampleSize%%2 == 0) {
+      sampleSize <- sampleSize + 1
+  }
+  gseaStatRes <- do.call(rbind, lapply(pathwaysFiltered, calcGseaStat, 
+      stats = stats, returnLeadingEdge = TRUE, scoreType = scoreType))
+  leadingEdges <- mapply("[", list(names(stats)), gseaStatRes[, 
+      "leadingEdge"], SIMPLIFY = FALSE)
+  pathwayScores <- unlist(gseaStatRes[, "res"])
+  seeds <- 42
+  BPPARAM <- setUpBPPARAM(nproc = nproc, BPPARAM = BPPARAM)
+  simpleFgseaRes <- fgseaSimpleImpl(pathwayScores = pathwayScores, 
+      pathwaysSizes = pathwaysSizes, pathwaysFiltered = pathwaysFiltered, 
+      leadingEdges = leadingEdges, permPerProc = nPermSimple, 
+      seeds = seeds, toKeepLength = m, stats = stats, BPPARAM = SerialParam(), 
+      scoreType = scoreType)
+  simpleFgseaRes[, `:=`(leZeroMean, NULL)]
+  simpleFgseaRes[, `:=`(geZeroMean, NULL)]
+  simpleFgseaRes[, `:=`(nLeEs, NULL)]
+  simpleFgseaRes[, `:=`(nGeEs, NULL)]
+  simpleFgseaRes[, `:=`(nLeZero, NULL)]
+  simpleFgseaRes[, `:=`(nGeZero, NULL)]
+  unbalanced <- simpleFgseaRes[is.na(pval)]
+  unbalanced[, `:=`(padj, as.numeric(NA))]
+  unbalanced[, `:=`(log2err, as.numeric(NA))]
+  if (nrow(unbalanced) > 0) {
+    warning("There were ", paste(nrow(unbalanced)),
+            " pathways for which P-values were not calculated properly due to ", 
+            "unbalanced (positive and negative) gene-level statistic values.")
+  }
+  simpleFgseaRes <- simpleFgseaRes[!is.na(pval)]
+  simpleError <- 1/log(2) * sqrt(trigamma(simpleFgseaRes$nMoreExtreme + 
+      1) - trigamma(nPermSimple + 1))
+  multError <- sapply((simpleFgseaRes$nMoreExtreme + 1)/(nPermSimple + 
+      1), multilevelError, sampleSize)
+  if (all(multError >= simpleError)) {
+      simpleFgseaRes[, `:=`(log2err, 1/log(2) * sqrt(trigamma(nMoreExtreme + 
+          1) - trigamma((nPermSimple + 1))))]
+      simpleFgseaRes <- rbindlist(list(simpleFgseaRes, unbalanced), 
+          use.names = TRUE)
+      setorder(simpleFgseaRes, pathway)
+      simpleFgseaRes[, `:=`("nMoreExtreme", NULL)]
+      setcolorder(simpleFgseaRes, c("pathway", "pval", "padj", 
+          "log2err", "ES", "NES", "size", "leadingEdge"))
+      simpleFgseaRes <- simpleFgseaRes[]
+      return(simpleFgseaRes)
+  }
+  dtSimpleFgsea <- simpleFgseaRes[multError >= simpleError]
+  dtSimpleFgsea[, `:=`(log2err, 1/log(2) * sqrt(trigamma(nMoreExtreme + 
+      1) - trigamma(nPermSimple + 1)))]
+  dtMultilevel <- simpleFgseaRes[multError < simpleError]
+  multilevelPathwaysList <- split(dtMultilevel, by = "size")
+  indxs <- sample(1:length(multilevelPathwaysList))
+  multilevelPathwaysList <- multilevelPathwaysList[indxs]
+  seed = 42
+  sign <- if (scoreType %in% c("pos", "neg")) 
+      TRUE
+  else FALSE
+  cpp.res <- multilevelImpl(multilevelPathwaysList, stats, 
+      sampleSize, seed, eps, sign = sign, BPPARAM = BPPARAM)
+  cpp.res <- rbindlist(cpp.res)
+  result <- rbindlist(multilevelPathwaysList)
+  result[, `:=`(pval, cpp.res$cppMPval)]
+  result[, `:=`(isCpGeHalf, cpp.res$cppIsCpGeHalf)]
+  result[, `:=`(log2err, multilevelError(pval, sampleSize = sampleSize))]
+  result[isCpGeHalf == FALSE, `:=`(log2err, NA)]
+  if (!all(result$isCpGeHalf)) {
+      warning("For some of the pathways the P-values were likely overestimated. ", 
+          "For such pathways log2err is set to NA.")
+  }
+  result[, `:=`(isCpGeHalf, NULL)]
+  result <- rbindlist(list(result, dtSimpleFgsea, unbalanced), 
+      use.names = TRUE)
+  result[, `:=`(nMoreExtreme, NULL)]
+  result[pval < eps, `:=`(c("pval", "log2err"), list(eps, NA))]
+  result[, `:=`(padj, p.adjust(pval, method = "BH"))]
+  if (nrow(result[pval == eps & is.na(log2err)])) {
+      warning("For some pathways, in reality P-values are less than ", 
+          paste(eps), ". You can set the `eps` argument to zero for better estimation.")
+  }
+  setcolorder(result, c("pathway", "pval", "padj", "log2err", 
+      "ES", "NES", "size", "leadingEdge"))
+  setorder(result, pathway)
+  result <- result[]
+  result
+}
+
+preparePathwaysAndStats <- getAnywhere(preparePathwaysAndStats)[["objs"]][[1]]
+
+D_fmatch <- getAnywhere(C_fmatch)
+fmatch <- function (x, table, nomatch = NA_integer_, incomparables = NULL) {
+  .Call(D_fmatch$objs[[1]]$address, x, table, nomatch, incomparables, FALSE)
+}
+
+setUpBPPARAM <- getAnywhere(setUpBPPARAM)[["objs"]][[1]]
+fgseaSimpleImpl <- getAnywhere(fgseaSimpleImpl)[["objs"]][[1]]
+SerialParam <- getAnywhere(SerialParam)[["objs"]][[1]]
+multilevelImpl <- function (multilevelPathwaysList, stats, sampleSize, seed, eps, 
+  sign = FALSE, BPPARAM = NULL) {
+  size = ES = NULL
+  res <- lapply(multilevelPathwaysList, FUN = function(x) {
+                    fgseaMultilevelCpp(x[, ES], stats, unique(x[, size]),
+                                       sampleSize, seed, eps, sign)
+                    })
+  return(res)
+}
+fgseaMultilevelCpp <- getAnywhere(fgseaMultilevelCpp)[["objs"]][[1]]
+```
+
+``` {r DESeq2_DEG}
+# Generate vector of cluster IDs
+clusters <- unique(metadata$cluster_id)
+
+# Generate gene lists for pathway analysis
+pathways_kegg <- read.gmt("../data/c2.cp.kegg.v7.2.symbols.gmt")
+pathways_react <- read.gmt("../data/c2.cp.reactome.v7.2.symbols.gmt")
+pathways_wp <- read.gmt("../data/c2.cp.wikipathways.v7.2.symbols.gmt")
+pathways_GO <- read.gmt("../data/c5.go.v7.2.symbols.gmt")
+# pathways_immune <- read.gmt("../data/c7.all.v7.2.symbols.gmt")
+
+pathway_list <- c("pathways_GO", "pathways_kegg", "pathways_react",
+                  "pathways_wp") # "pathways_immune",
+
+run_gsea <- function(pathway, results) {
+  user_GSEA(results, TERM2GENE = pathway, seed = T) %>%
+    arrange(p.adjust) %>% filter(p.adjust < 0.05)
+}
+
+save_gsea <- function(cluster, effect, gsea, path_name, res) {
+  gsea_plot <- ggplot(gsea@result, aes(reorder(Description, NES), NES)) +
+                      geom_col(aes(fill = NES > 0)) +
+                      scale_fill_manual(values = c("#a6a6a6", "#5a5a5a")) +
+                      coord_flip() +
+                      theme_bw(base_size=22, base_line_size = 0,
+                               base_rect_size = 0) +
+                      theme(legend.position = "none") +
+                      labs(x="Pathway", y="Normalized Enrichment Score",
+                           title= paste0(path_name, "Enriched"))
+  ggsave(filename = paste0(plots_path, cluster, "_", path_name,
+                           "_chart_", effect, "_res", res, suffix, ".svg"),
+         height = 14, width = 20, plot = gsea_plot)
+  if (dim(gsea@result)[1] > 1) {
+    eplot <- emapplot(gsea, color = "NES", showCategory = 100) +
+               scale_color_continuous(low="blue", high="red")
+    ggsave(filename = paste0(plots_path, cluster, "_", path_name, "_", method,
+                             "_eplot_", effect, "_res", res, suffix, ".svg"),
+           height = 14, width = 20, plot = eplot)
+  }
+
+  if (dim(gsea)[1] > 0) {
+    # Write the significant pathways to a csv file.
+    write.csv(as.data.frame(gsea@result),
+              paste0(bulk_path, cluster, "_", path_name, "_enriched_", effect,
+                     "_res", res, "_", suffix, ".csv"))
+  }
+}
+
+heatmap_colors <- colorRampPalette(c("blue", "white", "red"))
+
+# Perform DEG analysis between given metadata variables for each cluster
+for (cluster in clusters) {
+  # Print which cluster is being worked on
+  print(paste("Determining DEGs for", cluster))
+  
+  bulk_path <- paste0(outpath, "/DEG/pseudobulk_by_group/")
+  plots_path <- paste0(bulk_path, "plots/")
+
+  # Subset the metadata
+  cluster_metadata <- metadata[which(metadata$cluster_id == cluster), ]
+  
+  # Assign the rownames of the metadata to be the sample IDs
+  rownames(cluster_metadata) <- cluster_metadata[[ID]]
+
+  # Subset the counts to only the cluster
+  sub_counts <- aggregate[[cluster]]
+  cluster_counts <- as.data.frame(sub_counts[, which(colnames(sub_counts) %in%
+                                                rownames(cluster_metadata))])
+
+  # Check that all of the row names of the metadata are the same and in the same
+  # order as the column names of the counts in order to use as input to DESeq2
+  all(rownames(cluster_metadata) == colnames(cluster_counts))
+  
+  # Set the design of the DEG to test all variables given
+  design <- paste("~ (", str_c(meta_vars, collapse = " + "), ")*(",
+                  str_c(meta_vars, collapse = " + "), ")")
+  
+  for (meta_var in meta_vars) {
+    # Print which groups are being plotted
+    print(paste("Plotting heatmap and PCA for", meta_var))
+    
+    # Order the data by metadata group for visualization
+    cluster_metadata <-
+      cluster_metadata[order(as.vector(cluster_metadata[[meta_var]]),
+                                       cluster_metadata[[ID]]),]
+    
+    # Create DESeq object for DEG analysis
+    DEG_data <- DESeqDataSetFromMatrix(cluster_counts, 
+                                       colData = cluster_metadata, 
+                                       design = eval(str2expression(design)))
+    
+    # Transform counts for data visualization
+    log_DEG_data <- rlog(DEG_data, blind=TRUE)
+    
+    # Extract the rlog matrix from the object and compute pairwise correlation
+    # values
+    log_matrix <- assay(log_DEG_data)
+    log_matrix <- log_matrix[,match(cluster_metadata[[ID]], colnames(log_matrix))]
+    log_cor <- cor(log_matrix)
+    
+    # Attempt to change color of heatmap annotation. Next, try deframe()
+    # assign(Individual_Mutation_Status, c("#7e99b4", "blue"))
+    # names(Individual_Mutation_Status) <- unique(cluster_metadata[[meta_var]])
+    # mycolors <- list(Individual_Mutation_Status = Individual_Mutation_Status)
+    # 
+    # my_colors <- vector(mode = "list", length = 0)
+    # my_colors[[meta_var]] <- c("#7e99b4", "blue")
+    # 
+    # assign(meta_var, NULL)
+    # get_colors <- function(object) {
+    #   group <- toString(object)
+    #   object <- c("#7e99b4", "blue")
+    #   names(object) <- unique(cluster_metadata[[group]])
+    #   return(list(object = object))
+    # }
+    # 
+    # my_colors <- get_colors(get(meta_var))
+     
+    # Plot PCA
+    pca_data <- DESeq2::plotPCA(log_DEG_data, intgroup = meta_var,
+                                returnData = TRUE)
+    pca_plot <- ggplot(pca_data, aes_string("PC1", "PC2", color = meta_var)) +
+                geom_point(size = 3) +
+                coord_fixed() +
+                labs(title = cluster) + 
+                scale_color_manual(values = colors)
+    print(pca_plot)
+    ggsave(filename = paste0(plots_path, cluster, "_pseudo_pca_", meta_var,
+                             "_res", chose_resolution, "_", suffix, ".png"),
+           height = 7, width = 11, plot = pca_plot)
+  
+    # Plot heatmap
+    heatmap <- pheatmap(log_cor, main = cluster,
+                        color = heatmap_colors(200),
+                        annotation = cluster_metadata[, meta_var, drop=F],
+                        #annotation_colors = my_colors,
+                        annotation_names_col = FALSE,
+                        cluster_rows = FALSE, cluster_cols = FALSE)
+    ggsave(filename = paste0(plots_path, cluster, "_pseudo_heatmap_", meta_var,
+                             "_res", chose_resolution, "_", suffix, ".png"),
+           height = 7, width = 11, plot = heatmap)
+  }
+
+  # Run DESeq2 differential expression analysis
+  DEG_data <- DESeq2::DESeq(DEG_data)
+  
+  # Plot dispersion estimates
+  plotDispEsts(DEG_data)
+  
+  # Get names of the effects tested
+  names <- resultsNames(DEG_data)[-1]
+  
+  for (effect in names) {
+    # Print which effect is being worked on
+    print(paste("Determining DEGs for", effect))
+    
+    # Reset bulk directories
+    bulk_path <- paste0(outpath, "/DEG/pseudobulk_by_group/")
+    vol_path <- change_path(paste0(plots_path, "volcano_plots/"))
+    
+    # Create list of differential expression for all genes. This method
+    # returns the Wald "stat" value for gsea analysis
+    results <- results(DEG_data, name = effect, tidy = TRUE, cooksCutoff = 1)
+    assign(paste0("results_", cluster, "_", effect), results)
+    
+    # Plot a histogram of the p-values
+    hist_plot <- ggplot(results, aes(x = pvalue)) + 
+                 geom_histogram(color="black", fill="white") +
+                 theme(panel.grid.major = element_blank(),
+                       panel.grid.minor = element_blank(),
+                       panel.background = element_blank(),
+                       axis.line = element_line(colour = "gray"))
+                xlim(0, 1.05)
+    print(hist_plot)
+    ggsave(filename = paste0(plots_path, "DEG_padj_hist_", cluster, "_",
+                             effect, "_res.",
+                             chose_resolution, suffix, ".png"),
+               height = 7, width = 7, plot = hist_plot)
+    
+    # Show genes with significant fold changes
+    sig_markers <- filter(results,
+                          padj < 0.05 & abs(log2FoldChange) > log2_threshold)
+    print(sig_markers)
+    
+    # Create the volcano plot
+    remove_zeros <- function(markers) {
+      p_val <- NULL
+      row <- 1
+      while(markers$padj[row] == 0) {
+        row <- row + 1
+        p_val <- markers$padj[row]
+      }
+      while(row > 0) {
+        markers$padj[row] <- markers$padj[row + 1] * 0.99
+        row <- row - 1
+      }
+      return(markers)
+    }
+    top_genes <- top_n(sig_markers, n = 10, wt = log2FoldChange)
+    top_genes <- rbind(top_genes,
+                       top_n(sig_markers, n = -10, wt = log2FoldChange))
+    vol_plot <- ggplot(results) + 
+                geom_jitter(aes(x = log2FoldChange, y = -log10(padj),
+                               color = padj < 0.05 &
+                                         abs(log2FoldChange) > log2_threshold),
+                            width = .1, height = .1) +
+                scale_color_manual(values = c("black", "blue")) +
+                xlab("log2 fold change") + 
+                ylab("-log10 adjusted p-value") +
+                theme(legend.position = "none", 
+                      plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+                      axis.title = element_text(size = rel(1.25)),
+                      panel.grid.major = element_blank(),
+                      panel.grid.minor = element_blank(),
+                      panel.background = element_blank(),
+                      axis.line = element_line(colour = "black"))
+    if (nrow(top_genes > 1)) {
+      vol_plot <- vol_plot +
+                  geom_text_repel(aes(x = log2FoldChange,
+                                      y = -log10(padj),
+                                      label = ifelse(row %in% top_genes$row,
+                                                     row,"")))
+    }
+    
+    ggsave(filename = paste0(vol_path, "DEG_vol_plot_", cluster, "_",
+                             effect, "_res.",
+                             chose_resolution, suffix, ".svg"),
+               height = 7, width = 7, plot = vol_plot)
+    
+    if (dim(sig_markers)[1] > 0) {
+    
+      gene_list <- sig_markers$row
+      
+      # Create fitted value matrix
+      fitted <- assays(DEG_data)[["mu"]]
+      
+      fitted <- subset(fitted, row.names(fitted) %in% gene_list)
+      fitted <-
+        rbind(as.character(metadata[[meta_vars[1]]][1:dim(cluster_metadata)[1]]),
+              fitted)
+      rownames(fitted)[1] <- meta_vars[1]
+      fitted <- t(fitted)
+      fitted <- as.data.frame(fitted)
+      fitted[[meta_vars[1]]] <- as.factor(fitted[[meta_vars[1]]])
+      fitted[[meta_vars[1]]] <- relevel(fitted[[meta_vars[1]]],
+                                            ref = ref[1])
+  
+      vln_path <- change_path(paste0(plots_path, "violin_plots/"))
+      vln_plots <- NULL
+      for (gene in 1:length(gene_list)) {
+        fitted[[gene_list[[gene]]]] <-
+          as.integer(fitted[[gene_list[[gene]]]])
+        vln_plots[[gene]] <- ggplot(fitted,
+                                    aes_(x = as.name(meta_vars[1]),
+                                        y = as.name(gene_list[[gene]]),
+                                        fill = as.name(meta_vars[1]))) +
+                             #ylim(-1, 1.5) +
+                             geom_violin(trim = F) +
+                             scale_fill_manual(values = colors) +
+                             theme(panel.grid.major = element_blank(),
+                                   panel.grid.minor = element_blank(),
+                                   panel.background = element_blank(),
+                                   axis.line = element_line(colour = "black")) +
+                             geom_jitter(width = 0.1, height = 0.1)
+        ggsave(filename = paste0(vln_path, "DEG_vln_plot_", cluster, "_",
+                                 effect, "_", gene_list[[gene]], "_res.",
+                                 chose_resolution, suffix, ".svg"),
+               height = 7, width = 7, plot = vln_plots[[gene]])
+      }
+      plot4 <- wrap_plots(vln_plots) +
+               plot_annotation(title = effect)
+      ggsave(filename = paste0(vln_path, "DEG_vln_plot_", cluster, "_", effect,
+                               "_res.", chose_resolution, suffix, ".svg"),
+             height = 7, width = 14, plot = plot4)
+    
+      # Print which effect is being printed
+      print(paste("Saving DEGs for", effect))
+      
+      # Write the significant DEGs to a csv file.
+      write.csv(filter(results,
+                       padj < 0.05 & abs(log2FoldChange) > log2_threshold),
+                paste0(bulk_path, cluster, "_pseudo_DEGs_", effect,
+                       "_res", chose_resolution, suffix, ".csv"))
+    }
+    # Change row names to a column
+    results <- setDT(results, keep.rownames = TRUE)
+    
+    # Create fitted value matrix
+    fitted <- assays(DEG_data)[["mu"]]
+    assign(paste0("fitted_", cluster, "_", effect), fitted)
+    
+    # Get the top and bottom 10 DEGs by log2 fold change
+    top10_genes <- top_n(results, n = 10, wt = log2FoldChange)[,2]
+    bottom10_genes <- top_n(results, n = -10, wt = log2FoldChange)[,2]
+    fitted <- subset(fitted, row.names(fitted) %in% top10_genes$row |
+                           row.names(fitted) %in% bottom10_genes$row)
+    fitted <- fitted[,as.character(cluster_metadata[[ID]])]
+    heatmap <- pheatmap(fitted, scale = "row", color = heatmap_colors(200),
+                        annotation = cluster_metadata[, meta_vars[1], drop=F],
+                        annotation_names_col = FALSE, cluster_rows = FALSE,
+                        cluster_cols = FALSE)
+    ggsave(filename = paste0(plots_path, cluster, "_pseudo_DEG_heatmap_", effect,
+                             "_res", chose_resolution, "_", suffix, ".svg"),
+           height = 7, width = 11, plot = heatmap)
+    
+    if (identical(method, "lfc") & dim(filter(results, padj < 0.05))[1] > 0) {
+      # Print which GSEAs are being run
+      print(paste("Running lfc GSEAs for", effect, "in", cluster))
+      
+      # Run GSEA using shrunken log2 fold change
+      # Change output folders
+      bulk_path <- change_path(paste0(outpath,
+                                      "/DEG/pseudobulk_by_group/lfc_GSEA/"))
+      plots_path <- change_path(paste0(bulk_path, "plots/"))
+      
+      # Returns the differential expression of all genes, shrinking the fold
+      # change using apeglm. This is the recommended method from DESeq2 authors
+      results <- as.data.frame(lfcShrink(DEG_data, coef = effect,
+                                       type = "apeglm"))
+        
+      # Keep only gene symbol and stat value for pathway analysis
+      results_lfc <- results %>%
+        dplyr::select(rn, log2FoldChange) %>%
+        na.omit() %>%
+        distinct() %>%
+        group_by(rn) %>%
+        deframe() %>%
+        sort(decreasing = T)
+      
+      ties <- as.data.frame(table(results_lfc))
+      ties <- ties[ties$Freq > 2,]
+      print(paste("Removing", sum(ties$Freq),
+                  "genes with log2 fold change equal to more than one other gene"))
+      results_lfc <- results_lfc[!results_lfc %in% ties$results_lfc]
+
+  
+      # Run the sgea algorithm for each pathway
+      for (pathway in pathway_list) {
+        gsea_results <- run_gsea(pathway, results_lfc)
+        if (dim(gsea_results@result)[1] > 0) {
+          save_gsea(cluster, effect, gsea_results, pathway,
+                   chose_resolution)
+        }
+      }
+      
+      # Remove unnecessary variables
+      rm(results_lfc)
+      
+    } else if (identical(method, "-log10p")) {
+      # Print which GSEAs are being run
+      print(paste("Running -log10p GSEAs for", effect, "in", cluster))
+      
+      # Run GSEA using -log10(adj. p-value)
+      # Change output folders
+      bulk_path <- change_path(paste0(outpath,
+                                      "/DEG/pseudobulk_by_group/log10p_GSEA/"))
+      plots_path <- change_path(paste0(bulk_path, "plots/"))
+      
+      # Returns the differential expression of all genes, shrinking the fold
+      # change using apeglm. This is the recommended method from DESeq2 authors
+      results <- as.data.frame(lfcShrink(DEG_data, coef = effect,
+                                       type = "apeglm"))
+      
+      # Keep only gene symbol and stat value for pathway analysis
+      results_pval <- results %>%
+        dplyr::select(rn, pvalue) %>%
+        mutate(log10p = log10(pvalue) * -1) %>%
+        mutate(padj = NULL) %>%
+        na.omit() %>%
+        distinct() %>%
+        group_by(rn) %>%
+        deframe()
+  
+      # Run the fsgea algorithm for each pathway
+      for (pathway in pathway_list) {
+        gsea_results <- run_gsea(pathway, results_pval)
+        if (dim(gsea_results@result)[1] > 0) {
+          save_gsea(cluster, effect, gsea_results, pathway,
+                   chose_resolution)
+          if (dim(gsea_results@result)[1] > 20) {
+            gsea_results %>%
+            group_by(NES) %>%
+            filter(!between(dense_rank(NES), 11, n() - 10))
+          }
+        }
+      }
+      
+      # Remove unnecessary variables
+      rm(results_pval)
+      
+    } else if (identical(method, "wald")) {
+      # Print which GSEAs are being run
+      print(paste("Running Wald GSEAs for", effect, "in", cluster))
+      
+      # Run GSEA using Wald statistic
+      # Change output folders
+      bulk_path <- change_path(paste0(outpath,
+                                      "/DEG/pseudobulk_by_group/Wald/"))
+      plots_path <- change_path(paste0(bulk_path, "plots/"))
+      
+      # Keep only gene symbol and stat value for pathway analysis
+      results <- results %>%
+        dplyr::select(row, stat) %>%
+        na.omit() %>%
+        distinct() %>%
+        group_by(row) %>%
+        deframe() %>%
+        sort(decreasing = T)
+  
+      # Run the gsea algorithm for each pathway and save plots
+      for (pathway in pathway_list) {
+        gsea_results <- run_gsea(get(pathway), results)
+        assign(paste0("gsea_results_", cluster, "_", pathway, "_", effect),
+               gsea_results)
+        if (dim(gsea_results@result)[1] > 0) {
+          save_gsea(cluster, effect, gsea_results, pathway, chose_resolution)
+          if (dim(gsea_results@result)[1] > 20) {
+            gsea_results@result <- gsea_results@result %>%
+            filter(!between(dense_rank(NES), 11, n() - 10))
+            gsea_results@result$Description <- sub(".*?_", "",
+                                                   gsea_results@result$Description)
+            save_gsea(paste0(cluster, "_top10"), effect, gsea_results, pathway,
+                      chose_resolution)
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+```{r save_data}
+# Remove extraneous variables from the workspace
+rm(gene, start_data, sub_counts, cluster_counts, cluster_metadata, params,
+   DEG_data, fitted, kids, sids, splitf, res_name, reorder, n_cells, sce,
+   log2_threshold, method, meta_vars, meta_var, meta_factors, group, effect,
+   design, de_samples, de_cluster_ids, colors, cluster, clusters, log_DEG_data,
+   change_resolution, change_output_path, vln_plots, samples_list, gg_df, groups,
+   results, gene_list, top10genes, bottom10genes, results, ties, DEG_heatmap,
+   pca_plot, pca_data, heatmap, plot4, log_cor, log_matrix, clust_sample_table,
+   gsea_results, sig_markers, top10_genes, bottom10_genes, hist_plot, vol_plot)
+
+# Save the Seurat object so that we can load it again later
+print("Saving the workspace...")
+if (is.null(combined)) {
+  save.image(file = paste0(rfiles_path, "pseudobulk_ws", suffix,
+                           ".rdata"), compress = TRUE)
+} else {
+  save.image(file = paste0(rfiles_path, paste(combined, collapse = "-"),
+                           "_pseudobulk_ws", suffix, ".rdata"), compress = TRUE)
+}
+```

@@ -1,0 +1,242 @@
+---
+title: "snRNAseq_create_UMAPs"
+author: "Kevin Green"
+date: "9/29/2020"
+output:
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(foreach)
+library(doParallel)
+library(parallel)
+```
+
+# Jayadev Lab RNAseq Data Processing Pipeline
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Define your project folders, filenames, and variables of interest.
+# You MUST edit this for your dataset to run properly!!!!
+```{r 'Project_Information', echo=TRUE}
+# Previous data file name: (give the name for the appropriate .rdata file)
+start_data <- "preQC_normalized_ws_20210331.rdata"
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the thresholded Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+Sys.umask(mode = "000")
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+```
+## Run PCA on samples individually
+```{r Find_var_PCs}
+# Split the Seurat object back into its separate participant pieces
+# so that we can run the cleanup steps on each individual.
+ss_data_split <- SplitObject(ss_data_filtered,
+                             split.by = "orig.ident")
+
+# Remove files that are no longer needed
+rm(ss_data_filtered)
+
+# Set the number of cores to be used in parallel.
+cores <- detectCores()
+paste("Available cores = ", cores)
+if (numsubs < 16) {
+cores <- numsubs
+} else {
+  cores <- 16
+}
+paste("Cores used = ", cores)
+registerDoParallel(cores = cores)
+
+# Find the top variable genes for each sample
+if (identical(ss_data_split[[1]]@assays$RNA@var.features, character(0))) {
+  find_variable <- function(data) {
+    FindVariableFeatures(data,
+                         assay = assay,
+                         nfeatures = nfeatures)
+  }
+  ss_data_split <- mclapply(ss_data_split, find_variable, mc.cores = cores)
+}
+
+rm(nfeatures, unwanted)
+
+# Run PCA for each sample
+for (file in 1:length(ss_data_split)) {
+  print(paste("Running PCA for sample:", names[file]))
+  ss_data_split[[file]] <- RunPCA(ss_data_split[[file]],
+         assay = assay,
+         npcs = 20,
+         verbose = FALSE)
+}
+
+# Create an empty vector to which the minimum number of PCs will
+# be added
+PCs <- rep(NA, length(ss_data_split))
+
+# Determine the minimum number of PCs required to obtain a change in 
+# standard deviation of < 0.1. A maximum of 15 PCs is set.
+for (file in 1:length(ss_data_split)) {
+  print(paste("Determining the PCs required for sample:", names[file]))
+  # Determine the number of PCs required to obtain a change in standard deviation
+  # less than 0.1.
+  # Want to implement this: to account for 90% of the variance of the data with
+  # line of code commented below. - may not be possible
+  pcs <- Stdev(ss_data_split[[file]]@reductions$"pca")
+  print(paste("The variance accounted for by all prinicple components is:", 
+              sum(pcs), sep = " "))
+  #PCs <- min(which(cumsum(pcs) > 90))
+  print(paste("The number of prinicple components needed to account for greater",
+              "than 90% of the variance is:", min(which(cumsum(pcs) > 90))))
+  print(paste("The number of prinicple components needed to account for greater",
+              "than 95% of the variance is:", min(which(cumsum(pcs) > 95))))
+  PCs[[file]] <- min(which(diff(pcs) > -.2))
+  print(paste("The recommended number of prinicple components is:", PCs[[file]]))
+}
+
+# Changes the maximum PCs to 15 and prints the number of PCs used for each sample.
+for (num in 1:length(ss_data_split)) {
+  if (PCs[num] > 15 || is.na(PCs[num])) {
+    print(paste("Warning:", names[num], "has", PCs[num],
+                "PCs. Changing to 15 PCs."));
+    PCs[num] <- 15;
+  }
+  print(paste("The number of PCs used for", names[num], "is", PCs[num]));
+}
+
+# Print elbow plots for each sample.
+plot_pcs <- function(data, label) {
+  for (file in 1:length(data)) {
+    plot10 <- ElbowPlot(data[[file]])
+    # png(paste(plotspath, names[[file]], label,
+    #           "_PC_elbow_plot.png", sep = ""))
+    print(plot10)
+    dev.off()
+  }
+}
+
+plot_pcs(ss_data_split, suffix)
+```
+
+#Cluster cells using UMAP
+```{r}
+# Find nearest neighbors
+find_neighbors <- function(data) {
+  foreach (file = 1:length(data)) %do% {
+    print(paste("Finding nearest neighobrs for sample:", names[file]))
+    FindNeighbors(data[[file]],
+                  dims = 1:PCs[[file]],
+                  verbose = TRUE)
+  }
+}
+
+ss_data_split <- find_neighbors(ss_data_split)
+
+# Store the number of variables in meta data
+nVariables <- ncol(ss_data_split[[1]]@meta.data)
+
+#Find clusters based on resolution of nearest neighbors
+find_clusters <- function(data) {
+  foreach (file = 1:length(data)) %dopar% {
+    FindClusters(data[[file]],
+                 resolution = c(0.4, 0.6, 0.8, 1.0))
+  }
+}
+
+ss_data_split <- find_clusters(ss_data_split)
+
+resolutions <- c(paste0(assay, "_snn_res.0.4"), 
+                 paste0(assay, "_snn_res.0.6"), 
+                 paste0(assay, "_snn_res.0.8"), 
+                 paste0(assay, "_snn_res.1"))
+
+umap_pngs <- c("UMAP_0.4", "UMAP_0.6", "UMAP_0.8", "UMAP_1.0")
+                    
+# Assign identity of clusters
+identify_clusters <- function(data) {
+  foreach(file = 1:length(data)) %do% {
+    print(paste("Applying cluster identity for sample:", names[file]))
+    RunUMAP(data[[file]],
+            dims = 1:PCs[[file]])
+    }
+}
+
+ss_data_split <- identify_clusters(ss_data_split)
+
+plot_clusters <- function(data, resolutions, number) {
+  for(file in 1:length(data)) {
+    for (resolution in 1:length(resolutions)) {
+      plot11 <- DimPlot(object = data[[file]],
+                        reduction = "umap",
+                        group.by = resolutions[[resolution]],
+                        pt.size = 2)
+      png(paste(plotspath, "/", names[[file]], "_",
+                umap_pngs[[resolution]], "_",
+                number, suffix, ".png", sep = ""), 800, 800)
+        print(plot11)
+      dev.off()
+    }
+  }
+}
+
+plot_clusters(ss_data_split, resolutions, "1")
+
+#Reset sample names because foreach does not return names
+for (file in 1:length(ss_data_split)) {
+  names(ss_data_split)[file] <- names[[file]]
+}
+```
+
+```{r Save Data}
+# Remove files that are no longer needed
+rm(file, num, obj, pcs, PCs, umap_pngs, find_clusters, find_neighbors, identify_clusters)
+
+# Save workspace image if needed to revisit
+print("Saving the data...")
+save.image(file = paste0(rfiles_path, "UMAP_ws", suffix, ".rdata"),
+           compress = TRUE)
+```

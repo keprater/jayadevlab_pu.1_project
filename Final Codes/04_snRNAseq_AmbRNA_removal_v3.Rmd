@@ -1,0 +1,553 @@
+---
+title: "snRNAseq_AmbRNA_Removal"
+author: "Kevin Green"
+date: "7/8/2020"
+output:
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(SoupX)
+library(parallel)
+```
+# Jayadev Lab RNAseq Data Processing Pipeline
+
+## Ambient RNA removal
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Define your project folders, filenames, and variables of interest.
+# You MUST edit this for your dataset to run properly!!!!
+```{r 'Project_Information', echo=TRUE}
+# Previous data file name: (give the name for the appropriate .rdata file)
+start_data <- "UMAP_ws_20210331.rdata"
+
+# Set resolution index. If default settings were run, 1 = 0.4,
+# 2 = 0.6, 3 = 0.8, 4 = 1.0
+index <- 1
+
+# Provide a list of genes that can be used to explore ambient RNA removal
+# Good candidates include those that are highly cell-type specific or 
+# mitochondrial genes for nuclei
+genes_to_explore <- c("IGKC", "S100B", "MT-CO2", "HBA1", "HBB")
+
+# Some low quality samples may encounter issues creating marker plots.
+# You should run this set as TRUE first. If an issue is encountered, change
+# to FALSE
+marker_plot <- FALSE
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the clustered Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+Sys.umask(mode = "000")
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+```
+
+### Create list with cluster information for use with SoupX
+```{r Create_Cluster_info}
+print(paste("Using", resolutions[index], "as resolution"))
+# Set identity for each sample
+#idents_to_use <- c(2, 2, 2, 2, 2, 2, 2, 2) #use if various resolutions are used
+for (file in 1:length(ss_data_split)) {
+  Idents(ss_data_split[[file]]) <- resolutions[[index
+    #idents_to_use[[file]]
+    ]]
+}
+
+#Create an array for DR objects
+DR_objects <- rep(NA, length(ss_data_split))
+
+for (file in 1:length(ss_data_split)) {
+  df <- as.data.frame(ss_data_split[[file]]@reductions$umap@cell.embeddings) 
+  df2 <- as.data.frame(ss_data_split[[file]]@meta.data[[index + nVariables]])
+  df <- cbind(df, df2)
+  colnames(df)[3] <- "Cluster"
+  sample <- paste(names[file], "_DR", sep = "")
+  DR_objects[file] <- list(sample = assign(sample, df))
+  names(DR_objects)[file] <- sample
+  rm(list = sample)
+}
+
+for (sample in 1:length(DR_objects)) {
+  if (is.na(DR_objects[[sample]])) {
+    stop(cat("Sample ", names[[sample]], " does not have a DR object"))
+  }
+}
+
+#Remove objects that are no longer needed
+rm(df, df2)
+
+```
+
+```{r Create SoupX objects and add cluster info}
+# Check if soupx directory exists or needs to be created.
+souppath <- file.path(outpath, "soupx", fsep = "/")
+if (file.exists(souppath)) {
+  cat("Soupx directory path works!")
+} else {
+  cat("Soupx directory does not exist - creating")
+  dir.create(souppath)
+}
+
+# Create an array to hold the SoupX objects
+soupx_objects <- rep(NA, length(samples))
+
+# Create a list of SoupX objects from each data file. Will throw an error if
+# a SoupX object was not created for any sample.
+print("Creating SoupX objects...")
+for (file in 1:length(samples_path)) {
+  sparse_data <- Seurat::Read10X(data.dir = samples_path[[file]])
+  soup_object <- SoupX::SoupChannel(tod = sparse_data,
+                                    toc = ss_data_split[[file]]@assays$RNA@counts,
+                                    soupRange = c(0, 10),
+                                    keepDroplets = FALSE)       
+  soupx_objects[file] <- list(assign(x=names[[file]],
+                                       soup_object))
+  names(soupx_objects)[file] <- names[[file]]
+  rm(list = names[file])
+}
+
+for (sample in 1:length(soupx_objects)) {
+  if (is.na(soupx_objects[[sample]])) {
+    stop(cat("Sample ", names[[sample]], " does not have a soupx object"))
+  }
+}
+
+# Remove objects that are no longer needed
+rm(sparse_data, soup_object, ss_data_split)
+
+# Sets the dimensionality reduction for all future plots. Will throw an error if
+# any sample does not have DR.
+for (file in 1:length(soupx_objects)) {
+  soupx_objects[[file]] <- setDR(soupx_objects[[file]],
+                                 DR_objects[[file]])
+}
+for (sample in 1:length(soupx_objects)) {
+  if (is.null(soupx_objects[[sample]]$metaData$UMAP_1)) {
+    stop(cat("DR info was not added to ", names[[sample]]))
+  }
+}
+
+# Sets cluster info to determined clusters in DR object
+for (file in 1:length(soupx_objects)) {
+  soupx_objects[[file]] <- setClusters(soupx_objects[[file]],
+                                       DR_objects[[file]]$Cluster)
+}
+
+for (sample in 1:length(soupx_objects)) {
+  if (is.null(soupx_objects[[sample]]$metaData$clusters)) {
+    stop(cat("Cluster info was not added to ", names[[sample]]))
+  }
+}
+
+# Save soupx_objects file if needed to retest later
+print("Saving the data...")
+save.image(file = paste0(rfiles_path, "soupx_objects_ws", suffix, ".rdata"))
+```
+
+```{r Explore and set genes to be used for soup estimation}
+# Check if soup_markers directory exists or needs to be created.
+marker_path <- file.path(souppath, "soup_markers", fsep = "/")
+if (file.exists(marker_path)) {
+  cat("Soupx directory path works!")
+} else {
+  cat("Soupx directory does not exist - creating")
+  dir.create(marker_path)
+}
+
+# Explore highly expressed mRNA in soup to determine good candidates
+print("Creating soup profile CSV files...")
+for (file in 1:length(soupx_objects)) {
+  soup_profile <- 
+    head(soupx_objects[[file]]$soupProfile[order(
+      soupx_objects[[file]]$soupProfile$est,decreasing = TRUE), ], n = 100)
+  
+  write.csv(soup_profile,
+            file = paste0(marker_path, "/", names[[file]], "_soup_profile.csv"))
+}
+
+# This will save a marker gene plot for each sample. These plots
+# can be used to determine good candidates for marker genes
+if (marker_plot){
+  print("Creating marker plots...")
+  for (file in 1:length(soupx_objects)) {
+    plot12 <- plotMarkerDistribution(soupx_objects[[file]])
+    plot12
+    ggsave(filename = paste0(marker_path, "/", names[[file]],
+                             "_soup_marker_plot", suffix, ".png"),
+           height = 3.5, width = 3.5, plot = plot12)
+  }
+}
+
+# Remove temporary objects
+rm(soup_profile, plot12, marker_plot)
+```
+
+### This code will be used to establish gene sets that are expressed
+### only in one cell type for use with estimating contamination. This
+### may need to be adjusted for each dataset.
+```{r Establishing gene sets for contamination estimation}
+# # Establish gene list to use as estimation for non-expressed cells
+# geneList <- c("SOX2", "PTTG1", "PAX6")
+# 
+# # Explore genes as possible marker genes
+# for (file in 1:length(soupx_objects)) {
+#   for(gene in 1:length(geneList)) {
+#     plot13 <- plotMarkerMap(soupx_objects[[file]],
+#                             geneList[[gene]])
+# 
+#     png(paste(marker_path, "/", names[[file]], "_", geneList[[gene]],
+#               "_marker_plot.png", sep = ""), 800, 800)
+#       print(plot13)
+#     dev.off()
+#   }
+# }
+# 
+# rm(plot13)
+# 
+# # # Set KCN genes to those expressed in neurons (for 2 initial samples)
+# # geneList <- c("KCNC2", "KCNH1", "KCNIP4")
+# 
+# est_list <- rep(NA, length(soupx_objects))
+# 
+# # Establish which cells do not express KCN genes, and should be
+# # used to estimate contamination
+# for (file in 1:length(soupx_objects)) {
+# use_to_est <- estimateNonExpressingCells(soupx_objects[[file]],
+#                                       nonExpressedGeneList =
+#                                         list(IG = geneList))
+# est_list[file] <- list(assign(paste(names[[file]]), use_to_est))
+# names(est_list)[file] <- names[[file]]
+# rm(list = names[file])
+# }
+# 
+# # Print a marker plot for all genes being used to estimate contamination
+# for (file in 1:length(soupx_objects)) {
+#   plot14 <- plotMarkerMap(soupx_objects[[file]],
+#                           geneSet = geneList,
+#                           useToEst = use_to_est[[file]])
+# 
+#   png(paste(souppath, "/", names[[file]],
+#             "_gene_list_marker_plot.png", sep = ""), 800, 800)
+#     print(plot14)
+#   dev.off()
+# }
+# 
+# rm(plot14, use_to_est)
+```
+
+### This will create hemoglobin, IG and mitochondrial gene lists,
+### establish which nuclei will be used to estimate the contamination,
+### and plot these nuclei
+```{r Calculate contamination fraction}
+# Create a list of hemoglobin genes
+hb_genes <- c("HBA1", "HBA2", "HBB")
+
+# Create a list of Ig genes
+igGenes = c('IGHA1','IGHA2','IGHG1','IGHG2','IGHG3','IGHG4','IGHD','IGHE',
+            'IGHM','IGLC1','IGLC2','IGLC3','IGLC4','IGLC5','IGLC6','IGLC7',
+            'IGKC')
+
+# Create a list of mitochondrial genes
+mito_genes <- rep(NA, length(soupx_objects[[1]]$toc@Dimnames[[1]]))
+for (gene in 1:length(soupx_objects[[1]]$toc@Dimnames[[1]])) {
+  if (startsWith(soupx_objects[[1]]$toc@Dimnames[[1]][[gene]], "MT-") == TRUE) {
+  mito_genes[[gene]] <- soupx_objects[[1]]$toc@Dimnames[[1]][[gene]]
+  }
+}
+mito_genes <- Filter(function(x)!all(is.na(x)), mito_genes)
+
+# Set the gene list to use based on the sample type.
+# Nuclei should not express mitochondrial genes. We use this to our advantage by
+# estimating the contamination using only mitochondrial genes for nuclei samples
+# In PBMCs, only B cells express Ig genes at high levels. We use these genes
+# expressed in non-B cell clusters to estimate the contamination.
+# For organoids, neural progenitors express SOX2, PTTG1, and PAX6. We use these
+# genes expressed in non-progenitor cells to estimate contamination. This gene
+# list is still in progress.
+if (sample_type == "nuclei") {
+  geneList <- mito_genes
+  gene_type <- "mitochondrial genes"
+} else if (sample_type == "pbmcs") {
+  geneList <- igGenes
+  gene_type <- "IG genes"
+} else if (sample_type == "organoid") {
+  geneList <- c("SOX2", "PTTG1", "PAX6")
+  gene_type <- "neural progenitor genes"
+}
+
+# Estimate the contamination fraction for each sample based on sample type
+print("Estimating the contamination fractions...")
+est_list <- rep(NA, length(soupx_objects))
+if (exists("geneList")) {
+  # Establish which cells do not express the given genes, and should
+  # be used to estimate contamination
+  print("Determining cells to use for estimation...")
+  for (file in 1:length(soupx_objects)) {
+    use_to_est <- estimateNonExpressingCells(soupx_objects[[file]],
+                                          nonExpressedGeneList =
+                                            list(IG = geneList))
+    if (!any(use_to_est)) {
+      use_to_est <- estimateNonExpressingCells(soupx_objects[[file]],
+                                               nonExpressedGeneList =
+                                               list(IG = geneList),
+                                               maximumContamination = 2)
+    }
+    est_list[file] <- list(assign(paste(names[[file]]), use_to_est))
+    names(est_list)[file] <- names[[file]]
+    rm(list = names[file])
+  }
+  
+  # Print a marker plot for all droplets being used to estimate contamination
+  # This should use all nuclei as an estimation. Other sample types should show
+  # clear clusters that are not being used for estimation (those with high 
+  # expression)
+  for (file in 1:length(soupx_objects)) {
+    plot16 <- plotMarkerMap(soupx_objects[[file]],
+                            geneSet = geneList,
+                            useToEst = est_list[[file]]) +
+                geom_point(size = 0.1)
+    print(plot16)
+    ggsave(filename = paste0(marker_path, "/", names[[file]],
+                             "_cells_for_estimating_plot", suffix, ".png"),
+           height = 9, width = 9, plot = plot16)
+  }
+  
+  rm(plot16, use_to_est)
+  
+  # Use given genes to estimate contamination
+  print("Estimating contamination fraction...")
+  for (file in 1:length(soupx_objects)) {
+    soupx_objects[[file]] <-
+      calculateContaminationFraction(soupx_objects[[file]],
+                                     list(genes = geneList),
+                                     useToEst = est_list[[file]])
+    writeLines(paste("Estimated fraction of ambient RNA in", names[[file]],
+                "using only", gene_type, "is",
+                round((soupx_objects[[file]]$metaData$rho[1])*100, 1)))
+  }
+} else {
+  # For sample types with unknown markers for estimation, we use the built in 
+  # SoupX function that will estimate the contamination using an iterative
+  # process. Recent tests using this method show that it always decreases the 
+  # estimated contamination fraction at an amount that is directly proportional
+  # to the given standard deviation. Since this appears to under estimate
+  # contamination, a minmum of 5% contamination is set.
+  print("Estimating contamination fraction...")
+  for (file in 1:length(soupx_objects)) {
+    soupx_objects[[file]] <- 
+      autoEstCont(soupx_objects[[file]], verbose = 2)
+    writeLines(paste("Estimated fraction of ambient RNA in", names[[file]],
+                "using using default rho is",
+                round((soupx_objects[[file]]$metaData$rho[1])*100, 1),
+                "%"))
+    if (soupx_objects[[file]]$metaData$rho[1] < .05) {
+        soupx_objects[[file]] <- 
+          setContaminationFraction(soupx_objects[[file]], 0.05)
+        writeLines(paste("Estimated fraction of ambient RNA in",
+                         names[[file]],"is less than 5%. Setting to 5%"))
+    }
+  }
+}
+
+# According to SoupX documentation, 20% contamination is considered high. We 
+# set a maximum of 20% contamination for all samples.
+for (file in 1:length(soupx_objects)) {
+  if (soupx_objects[[file]]$metaData$rho[1] > .2) {
+        soupx_objects[[file]] <- 
+          setContaminationFraction(soupx_objects[[file]], 0.2)
+        writeLines(paste("Estimated fraction of ambient RNA in", 
+                         names[[file]],"is greater than 20%. Setting to 20%"))
+  }
+}
+```
+### Ambient RNA fraction estimates
+```{r estimates}
+# Print out a list of the final estimates
+for (file in 1:length(soupx_objects)) {
+  writeLines(paste("The ambient RNA fraction removed from", names[[file]],
+              "will be",
+              round((soupx_objects[[file]]$metaData$rho[1])*100, 1), "%"))
+}
+```
+### Remove the ambient RNA
+```{r remove_contamination}
+# Create vector to populate with adjusted count files post-contamination removal
+soupx_out <- rep(NA, length(soupx_objects))
+
+# Removes the ambient RNA from each sample
+print("Removing the ambient RNA...")
+remove_ambient <- function(data) {
+    adjustCounts(data, roundToInt = TRUE)
+}
+system.time(soupx_out <- lapply(soupx_objects, remove_ambient))
+```
+
+### This code will explore the genes that were most effected by
+### removal and any specific gene we want to look at. It is not
+### necessary to run this portion.
+```{r Check_changes}
+# Explore genes that were reduced to zero
+zeroed_path <- file.path(souppath, "zeroed", fsep = "/")
+if (file.exists(zeroed_path)) {
+  print("Zeroed directory path works!")
+} else {
+  print("Zeroed directory does not exist - creating")
+  dir.create(zeroed_path)
+}
+for (file in 1:length(soupx_objects)) {
+  pre_removal <- rowSums(soupx_objects[[file]]$toc > 0)
+  post_removal <- rowSums(soupx_out[[file]] > 0)
+  most_zeroed = tail(sort((pre_removal -
+                             post_removal)/pre_removal),
+                     n = 10)
+  
+  write.csv(most_zeroed,
+            file = paste(zeroed_path, "/", names[[file]], "_most_zeroed",
+                         suffix, ".csv", sep = ""))
+}
+rm(pre_removal, post_removal, most_zeroed)
+
+# Explore the genes with the largest quantitative difference
+changed_path <- file.path(souppath, "most_changed", fsep = "/")
+if (file.exists(changed_path)) {
+  print("Most_changed directory path works!")
+} else {
+  print("Most_changed directory does not exist - creating")
+  dir.create(changed_path)
+}
+for (file in 1:length(soupx_objects)) {
+  changed_genes <- tail(sort(rowSums(soupx_objects[[file]]$toc >
+                                       soupx_out[[file]])/
+                                        rowSums(soupx_objects[[file]]$toc 
+                                                          > 0)), n = 20)
+  
+  write.csv(changed_genes,
+            file = paste(changed_path, "/", names[[file]], "_most_changed",
+                         suffix, ".csv", sep = ""))
+}
+rm(changed_genes)
+
+# This explores specific genes using a UMAP. It will print UMAPs for each of the
+# genes given by the user and the first gene that is used to estimate the 
+# contamination.
+if (exists("geneList")) {
+  genes_to_explore <- c(genes_to_explore, geneList[[1]])
+}
+for (gene in 1:length(genes_to_explore)) {
+  gene_path <- file.path(souppath, genes_to_explore[[gene]], fsep = "/")
+  if (file.exists(gene_path)) {
+    cat(genes_to_explore[[gene]], "directory path works!")
+  } else {
+    cat(genes_to_explore[[gene]], "directory does not exist - creating")
+    dir.create(gene_path)
+  }
+  for (file in 1:length(soupx_objects)) {
+    plot17 <- plotChangeMap(soupx_objects[[file]], soupx_out[[file]],
+                            genes_to_explore[[gene]])
+    ggsave(filename = paste0(gene_path, "/", names[[file]], "_",
+                             genes_to_explore[[gene]], "_change_plot", suffix,
+                             ".png"),
+           height = 9, width = 9, plot = plot17)
+  }
+}
+
+# Remove objects that are no longer needed
+rm(plot17, soupx_objects, gene_path, gene, sample)
+```
+  
+```{r Create seurat object}
+# Create Seurat objects from decontaminated data for further analysis
+for (file in 1:length(soupx_out)){
+  seurat_obj <- CreateSeuratObject(counts = soupx_out[[file]], 
+                                   project = samples[[file]])
+  seurat_obj[["Pt_ID"]] <- names[file]
+  assign(x=names[[file]], seurat_obj)
+  print(paste(names[[file]], 'seurat object properly created:',
+              identical(dim(seurat_obj), dim(soupx_out[[file]]))))
+}
+
+# Join the individual patient matrices into one
+if (length(samples) > 1) {
+  ss_data_decon <- merge(get(names[1]),get(names[2]))
+  if (length(samples_path) >= 3){
+    for (obj in 3:length(samples_path)){
+      ss_data_decon <- merge(ss_data_decon, get(names[obj]))
+      }
+  }
+} else {
+  ss_data_decon <- get(names[1])
+}
+
+# Checks if the number of samples expected match the dimensions of your data
+if (numsubs == length(unique(ss_data_decon@meta.data$Pt_ID))){
+  cat("The number of samples in your Seurat object matches the", 
+        "number of expected samples")
+} else {
+  warning("The number of samples in your Seurat object does not ",
+          "match the number of expected samples")
+}
+
+# Remove objects that are no longer needed
+rm(seurat_obj, DR_objects, est_list, genes_to_explore, soupx_out,
+   create_clusters, remove_ambient, zeroed_path, changed_path,
+   gene_type, geneList, hb_genes, igGenes, mito_genes, souppath, marker_path)
+for (file in 1:length(names)) {
+  rm(list = names[file])
+}
+```
+
+```{r Save_image}
+# Save workspace image if needed to revisit
+print("Saving the data...")
+save.image(file = paste0(rfiles_path, "soupX_ws", suffix, ".rdata"),
+           compress = TRUE)
+
+# Save the merged Seurat object for further analysis
+saveRDS(ss_data_decon,
+        file = paste0(rfiles_path, "ss_data_decon", suffix, ".rds"))
+```

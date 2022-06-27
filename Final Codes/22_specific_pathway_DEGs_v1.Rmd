@@ -1,0 +1,405 @@
+---
+title: "22_specific_pathway_DEGs_v1"
+author: "Kevin Green and Katie Prater"
+date: "3/9/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Matrix)
+library(Seurat)
+library(scater)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(magrittr)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(apeglm)
+library(png)
+library(DESeq2)
+library(RColorBrewer)
+library(data.table)
+library(patchwork)
+library(clusterProfiler)
+library(ggrepel)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Detection of Differential genes by pseudobulk analysis
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset with cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "pseudobulk_ws_mg_only_refSCT_20210331.rdata"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Set the sample ID meta-data variable name
+ID <- "Pt_ID"
+
+# Set variables from metadata on which to perform DEG (must match variable names
+# in metadata exactly). All other variables given will be regressed out before
+# testing each variable. For this reason, use caution when adding many when the
+# sample size is small.
+meta_vars <- c("Study_Designation", "Sex")
+
+# Set the reference value of the first meta_var (e.g. "Ctrl")
+ref <- "Ctrl"
+
+# Input any metadata variables for discrete groups that are set as integers
+# (e.g. mutation status = 0 or 1). Otherwise, NULL
+meta_factors <- NULL
+
+# Set cluster name(s) that need to be analyzed
+clusters <- c("1", "2", "3", "4", "5", "6", "8", "9")
+
+# Set the csv file containing the pathways you wish to investigate further.
+# Please put the csv in the data folder of the project
+pathway_csv <- "Pathways_of_interest.csv"
+
+# Choose the minimum fold change of a gene, in either group being tested, for
+# the gene to be tested. Fold change is expressed as log base 2.
+# (0.585 ~ 1.5 increase, 0.322 ~ 1.25 increase)
+log2_threshold <- 0.322
+
+# Input which colors to use in the violin plots. Input as a list
+# (e.g. c("gray", "salmon")) or a color palette (e.g. brewer.pal(3, "Paired"))
+colors <- c("gray", "salmon")
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.3"
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Check if csv exists
+if (!file.exists(paste0("../data/", pathway_csv))) {
+  stop(paste(pathway_csv, "not found"))
+}
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("000")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+outpath <- change_path(outpath)
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+# Set the DEG folder
+DEG_path <- change_path(paste0(outpath,
+                               "/DEG/pseudobulk_by_group/paths_of_interest/"))
+```
+
+``` {r DESeq2_DEG}
+# Read in pathway databases
+pathways_kegg <- read.gmt("../data/c2.cp.kegg.v7.2.symbols.gmt")
+pathways_react <- read.gmt("../data/c2.cp.reactome.v7.2.symbols.gmt")
+pathways_wp <- read.gmt("../data/c2.cp.wikipathways.v7.2.symbols.gmt")
+
+# Set up cluster specific pathway list
+pathway_list <- c("cluster_kegg", "cluster_react", "cluster_wp")
+
+# Perform DEG analysis between given metadata variables for each cluster
+for (cluster in clusters) {
+  # Print which cluster is being worked on
+  print(paste("Determining DEGs for", cluster))
+  
+  # Set the file paths to DEG folder:
+  bulk_path <- change_path(paste0(DEG_path, "cluster_", cluster, "/"))
+  
+  # Set the path to plot folders
+  plots_path <- change_path(paste0(bulk_path, "plots/"))
+  vln_path <- change_path(paste0(plots_path, "violin_plots/"))
+  vol_path <- change_path(paste0(plots_path, "volcano_plots/"))
+  hist_path <- change_path(paste0(plots_path, "pval_histograms/"))
+  heat_path <- change_path(paste0(plots_path, "heatmaps/"))
+  
+  # Read in csv
+  paths_of_interest <- readLines(paste0("../data/", pathway_csv))
+  
+  # Remove genelists that are not of interest
+  all_paths <- pathways_kegg[pathways_kegg$term %in% paths_of_interest,]
+  all_paths <- rbind(all_paths,
+                     pathways_react[pathways_react$term %in% paths_of_interest,])
+  all_paths <- rbind(all_paths,
+                     pathways_wp[pathways_wp$term %in% paths_of_interest,])
+  all_paths$term <- factor(all_paths$term, paths_of_interest)
+  all_paths_list <- split(all_paths, all_paths$term)
+
+  # Subset the metadata
+  cluster_metadata <- metadata[which(metadata$cluster_id == cluster), ]
+  
+  # Assign the rownames of the metadata to be the sample IDs
+  rownames(cluster_metadata) <- cluster_metadata[[ID]]
+
+  # Subset the counts to only the cluster
+  sub_counts <- aggregate[[cluster]]
+  
+  for (list in 1:length(all_paths_list)) {
+    # Subset the counts to only the cluster and genes in the pathway of interest
+    cluster_counts <- as.data.frame(sub_counts[, which(colnames(sub_counts) %in%
+                                              rownames(cluster_metadata))])
+    cluster_counts <- cluster_counts[which(rownames(cluster_counts) %in%
+                                                  all_paths_list[[list]]$gene),]
+    
+    # Remove genes with zero counts in this cluster
+    cluster_counts <- cluster_counts[rowSums(cluster_counts[]) > 0,]
+    
+    # Print the number of genes being analyzed from the pathway
+    print(paste("Analyzing", nrow(cluster_counts), "genes from",
+                all_paths_list[[list]][1,1]))
+  
+    # Check that all of the row names of the metadata are the same and in the same
+    # order as the column names of the counts in order to use as input to DESeq2
+    all(rownames(cluster_metadata) == colnames(cluster_counts))
+    
+    # Set the design of the DEG to test all variables given
+    design <- paste("~ (", str_c(meta_vars, collapse = " + "), ")*(",
+                    str_c(meta_vars, collapse = " + "), ")")
+    
+    # Print which groups are being plotted
+    print(paste("Running DEG using DESeq2 on genes in",
+                all_paths_list[[list]][1,1]))
+    
+    # Order the data by metadata group for visualization
+    cluster_metadata <-
+      cluster_metadata[order(as.vector(cluster_metadata[[meta_vars[1]]]),
+                                       cluster_metadata[[ID]]),]
+    
+    # Create DESeq object for DEG analysis
+    DEG_data <- DESeqDataSetFromMatrix(cluster_counts, 
+                                       colData = cluster_metadata, 
+                                       design = eval(str2expression(design)))
+
+    # Run DESeq2 differential expression analysis
+    DEG_data <- DESeq2::DESeq(DEG_data)
+    
+    # Get names of the effects tested
+    names <- resultsNames(DEG_data)[-1]
+    
+    for (effect in names) {
+      # Print which effect is being worked on
+      print(paste("Determining DEGs for", effect))
+      
+      # Create list of differential expression for all genes. This method
+      # returns the Wald "stat" value for gsea analysis
+      results <- results(DEG_data, name = effect, tidy = TRUE,
+                         cooksCutoff = FALSE)
+      
+      # Plot a histogram of the p-values
+      hist_plot <- ggplot(results, aes(x = pvalue)) + 
+                   geom_histogram(color="black", fill="white") +
+                   theme(panel.grid.major = element_blank(),
+                         panel.grid.minor = element_blank(),
+                         panel.background = element_blank(),
+                         axis.line = element_line(colour = "gray")) +
+                   xlim(0, 1.05)
+      print(hist_plot)
+      ggsave(filename = paste0(hist_path, "DEG_pvalue_hist_", cluster, "_",
+                               all_paths_list[[list]][1,1], "_", effect,
+                               "_res.", chose_resolution, suffix, ".png"),
+                 height = 7, width = 7, plot = hist_plot)
+        
+      # Show genes with significant fold changes
+      sig_results <- filter(results,
+                            padj < 0.05 & abs(log2FoldChange) > log2_threshold)
+      print(sig_results)
+      
+      # Create the volcano plot
+      top_genes <- top_n(sig_results, n = 10, wt = log2FoldChange)
+      top_genes <- rbind(top_genes,
+                         top_n(sig_results, n = -10, wt = log2FoldChange))
+      vol_plot <- ggplot(results) + 
+                  geom_jitter(aes(x = log2FoldChange, y = -log10(padj),
+                                 color = padj < 0.05 &
+                                           abs(log2FoldChange) > log2_threshold),
+                              width = .1, height = .1) +
+                  scale_color_manual(values = c("black", "blue")) +
+                  xlab("log2 fold change") + 
+                  ylab("-log10 adjusted p-value") +
+                  theme(legend.position = "none", 
+                        plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+                        axis.title = element_text(size = rel(1.25)),
+                        panel.grid.major = element_blank(),
+                        panel.grid.minor = element_blank(),
+                        panel.background = element_blank(),
+                        axis.line = element_line(colour = "black"))
+      if (nrow(top_genes > 1)) {
+        vol_plot <- vol_plot +
+                    geom_text_repel(aes(x = log2FoldChange,
+                                        y = -log10(padj),
+                                        label = ifelse(row %in% top_genes$row,
+                                                       row,"")))
+      }
+      ggsave(filename = paste0(vol_path, "vol_plot_", cluster, "_",
+                               all_paths_list[[list]][1,1], "_", effect,
+                               "_res.", chose_resolution, suffix, ".svg"),
+                 height = 7, width = 7, plot = vol_plot)
+      
+      # Create object to hold all significant genes
+      up_in_paths <- NULL
+      
+      if (dim(sig_results)[1] > 0) {
+      
+        gene_list <- sig_results$row
+        
+        # Create fitted value matrix
+        fitted <- assays(DEG_data)[["mu"]]
+        
+        fitted <- subset(fitted, row.names(fitted) %in% gene_list)
+        fitted <-
+          rbind(as.character(metadata[[meta_vars[1]]][1:dim(cluster_metadata)[1]]),
+                fitted)
+        rownames(fitted)[1] <- meta_vars[1]
+        fitted <- t(fitted)
+        fitted <- as.data.frame(fitted)
+        fitted[[meta_vars[1]]] <- as.factor(fitted[[meta_vars[1]]])
+        fitted[[meta_vars[1]]] <- relevel(fitted[[meta_vars[1]]],
+                                              ref = ref[1])
+    
+        vln_plots <- NULL
+        for (gene in 1:length(gene_list)) {
+          fitted[[gene_list[[gene]]]] <-
+            as.integer(fitted[[gene_list[[gene]]]])
+          vln_plots[[gene]] <- ggplot(fitted,
+                                      aes_(x = as.name(meta_vars[1]),
+                                          y = as.name(gene_list[[gene]]),
+                                          fill = as.name(meta_vars[1]))) +
+                               geom_violin(trim = F) +
+                               scale_fill_manual(values = colors) +
+                               stat_summary(fun = mean, fun.min = mean,
+                                            fun.max = mean, geom = "crossbar",
+                                            width = 0.4, color = "#777777") +
+                               theme(panel.grid.major = element_blank(),
+                                     panel.grid.minor = element_blank(),
+                                     panel.background = element_blank(),
+                                     axis.line = element_line(colour = "black")) +
+                               geom_jitter(width = 0.1, height = 0.1)
+          ggsave(filename = paste0(vln_path, "DEG_vln_plot_", cluster, "_",
+                                   effect, "_", gene_list[[gene]], "_res.",
+                                   chose_resolution, suffix, ".svg"),
+                 height = 7, width = 7, plot = vln_plots[[gene]])
+        }
+        plot4 <- wrap_plots(vln_plots) +
+                 plot_annotation(title = effect)
+        ggsave(filename = paste0(vln_path, cluster, "_",
+                                 all_paths_list[[list]][1,1], "_vln_plot_",
+                                 effect, "_res.", chose_resolution, suffix,
+                                 ".svg"), height = 7, width = 14, plot = plot4)
+      
+        # Print which effect is being printed
+        print(paste("Saving DEGs for", effect))
+        
+        # Write the significant DEGs to a csv file.
+        write.csv(sig_results,
+                  paste0(bulk_path, cluster, "_", all_paths_list[[list]][1,1],
+                         "_DEGs_", effect, "_res", chose_resolution, suffix,
+                         ".csv"))
+        
+        # Change row names to a column
+        results <- setDT(results, keep.rownames = TRUE)
+        
+        # Create fitted value matrix
+        fitted <- assays(DEG_data)[["mu"]]
+        
+        # Get the top and bottom 10 DEGs by log2 fold change
+        top10_genes <- top_n(results, n = 10, wt = log2FoldChange)[,2]
+        bottom10_genes <- top_n(results, n = -10, wt = log2FoldChange)[,2]
+        fitted <- subset(fitted, row.names(fitted) %in% top10_genes$row |
+                               row.names(fitted) %in% bottom10_genes$row)
+        fitted <- fitted[,as.character(cluster_metadata[[ID]])]
+        heatmap <- pheatmap(fitted, scale = "row", color = heatmap_colors(200),
+                            annotation = cluster_metadata[, meta_vars[1], drop=F],
+                            annotation_names_col = FALSE, cluster_rows = FALSE,
+                            cluster_cols = FALSE)
+        ggsave(filename = paste0(heat_path, cluster, "_",
+                                 all_paths_list[[list]][1,1],
+                                 "_pseudo_DEG_heatmap_", effect, "_res",
+                                 chose_resolution, "_", suffix, ".svg"),
+               height = 7, width = 11, plot = heatmap)
+        if (effect == names[1]) {
+          up_in_paths <- rbind(up_in_paths, sig_results)
+        }
+      }
+    }
+  }
+  if (!is.null(up_in_paths)) {
+    # Write the significant DEGs to a csv file.
+    write.csv(up_in_paths,
+              paste0(bulk_path, cluster, "_DEGs_in_all_pathways_", effect,
+                     "_res", chose_resolution, suffix, ".csv"))
+  }
+}
+```

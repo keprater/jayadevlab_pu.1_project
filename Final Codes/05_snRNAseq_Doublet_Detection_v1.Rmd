@@ -1,0 +1,235 @@
+---
+title: "snRNAseq_QC_Doublet_Detection_v1"
+author: "Katie Prater and Kevin Green"
+date: "06/19/2020"
+output:
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+use_condaenv("/gscratch/jayadevlab/files/software/conda/envs/miniconda_setup")
+library(Seurat)
+library(ggplot2)
+library(Matrix)
+library(filesstrings)
+library(rlist)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Doublet Detection for QC cleanup of data
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that needs to have doublets detected.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Directory_setup}
+# Name of the Rdata file to load in:
+start_data <- "soupX_ws_20210331.rdata"
+
+#__________________Do not edit below this line______________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the thresholded Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+Sys.umask(mode = "000")
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+```
+
+```{r Generate_matrices}
+# Split the Seurat object back into its separate participant pieces so that we
+# can run the cleanup steps on each individual.
+print('Splitting Seurat Object to run Doublet Detection on Individuals')
+ss_data_split <- SplitObject(ss_data_decon, split.by = "orig.ident") 
+
+# Generate a counts matrix for each sample
+# Split out the count matrices as sparse matrices named by the sample
+cm_name <- rep(NA, length(samples))
+ss_obj_names <- list.names(ss_data_split)
+for (index in 1:length(samples)) {
+  cm_name[index]<-paste0('count_matrix_', names[index], collapse = "")
+  print(paste('Working on matrix:', cm_name[index], sep=" "))
+  ss_obj_index<-match(samples[index], ss_obj_names)
+  assign(cm_name[index],GetAssayData(object = ss_data_split[[ss_obj_index]],
+                                     slot = "data"))
+  print(paste('Matrices match dimensions:', identical(dim(get(cm_name[index])),
+              dim(ss_data_split[[ss_obj_index]]))))
+}
+
+# Remove objects that are no longer necessary
+rm(ss_obj_index, ss_obj_names)
+
+# Generate a list of genes
+genes<-row.names(get(cm_name[index]))
+
+# Transpose the sparse matrices for Scrublet (cells as rows and genes as columns)
+tcm_name<- rep(NA, length(samples))
+for (index in 1:length(samples)) {
+  tcm_name[index]<-paste0('tcm_', names[index], collapse = "")
+  print(paste('Transposing matrix:', tcm_name[index], sep=" "))
+  assign(tcm_name[index],t(get(cm_name[index])))
+  print(paste('Matrix properly transposed:',
+              identical(ncol(get(cm_name[index])),nrow(get(tcm_name[index])))))
+}
+
+# Remove objects that are no longer needed
+rm(ss_data_decon, ss_data_split)
+objs<-ls()
+objects_to_remove<-c(grep('count_', objs, value = TRUE))
+rm(list=objects_to_remove)
+
+# Check if output directory exists or needs to be created.
+doublet_path <- paste0(outpath, "/doublet_detection")
+if (file.exists(doublet_path)) {
+  cat("doublet_detection directory path works!\n")
+} else {
+  cat("doublet_detection directory does not exist - creating\n")
+  dir.create(doublet_path)
+}
+
+print("Saving the data...")
+save.image(file = paste0(rfiles_path, "decon_split_matrices_ws", suffix,
+                         ".rdata"),
+           compress = TRUE)
+```
+
+### Do doublet detection using Scrublet:
+### Scrublet is a python package, so we are using a python code chunk here for a bit.
+```{python Scrublet_Detection}
+# Document which version of Python you are using
+import sys
+print("You are using Python {}.{}.".format(sys.version_info.major,
+      sys.version_info.minor))
+
+# Setup Python with the libraries we want to use
+import scrublet as scr #(for R: scr<-import('scrublet'))
+import scipy.io
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import csv
+
+# Run Scrublet on all samples
+samples = list(r.tcm_name)
+for sample in samples:
+
+    # Read in the transposed counts matrix to scrublet and python
+    # Matrix needs to be cells as rows and genes as columns
+    input_dir = r.projdir
+    counts_matrix = r[sample]
+    genes = r.genes
+
+    # Print to screen the size of the matrix so we can see the number of genes
+    print('Counts matrix shape: {} rows, {} columns'.format(counts_matrix.shape[0],
+                                                            counts_matrix.shape[1]))
+    print('Number of genes in gene list: {}'.format(len(genes)))
+
+    # Initialize the scrublet object
+    scrub = scr.Scrublet(counts_matrix, expected_doublet_rate=0.12)
+    # Expected doublet rate is 0.8% per 1600 cells based on 10X Chromium
+    # documentation. Kevin loads ~24000 nuclei, so we expect our doublet rate to
+    # be about 12%
+    print('Expected Doublet Rate is: 0.12')
+
+    # Run default Scrublet pipeline
+    print('Running default Scrublet pipeline')
+    doublet_scores, predicted_doublets = scrub.scrub_doublets(
+      min_counts=2, 
+      min_cells=3,
+      min_gene_variability_pctl=85,
+      n_prin_comps=30
+    )
+    
+  
+    # Write the doublet_scores and predicted_doublets to a csv file for each sample
+    print('Doublet scores shape: {} rows'.format(doublet_scores.shape[0])) 
+    print('Predicted Doublets shape: {} rows'.format(predicted_doublets.shape[0]))
+    with open(sample[4:]+'_decon_doublet_scores.csv', 'w', newline='\n') as csvfile:
+        samplewriter = csv.writer(
+            csvfile,
+            delimiter=',',
+            quotechar='|',
+            quoting=csv.QUOTE_MINIMAL
+        )
+        samplewriter.writerow([
+            'doublet_scores',
+            'predicted_doublets',
+            'threshold_is_{}'.format(scrub.threshold_)
+        ])
+        for doublet_index, doublet_score in enumerate(doublet_scores):
+            samplewriter.writerow([
+                doublet_score,
+                predicted_doublets[doublet_index]
+            ])
+     
+    # Visualize the data and the threshold Scrublet chose for doublets
+    scrub.plot_histogram();
+    plt.suptitle(sample[4:]+' threshold is {}'.format(scrub.threshold_),
+                 fontweight='bold')
+    plt.show()
+    plt.savefig(sample[4:] + '_decon_doublet_histo.png', transparent=True)
+    
+    # Run UMAP to visualize doublets in clusters
+    print('Running UMAP...')
+    scrub.set_embedding('UMAP', scr.get_umap(scrub.manifold_obs_, 10, min_dist=0.3))
+    print('Done.')
+    
+    # Plot UMAPS. Doublets should cluster together.
+    scrub.plot_embedding('UMAP', order_points=True);
+    plt.suptitle(sample[4:])
+    plt.show()
+    plt.savefig(sample[4:] + '_decon_doublet_umaps.png', transparent=True)
+```
+
+### Scrublet has been run, now we put all the generated data in the output
+### folder.
+```{r Cleanup_Files}
+# Move the histograms and umap images to the output folder.
+pngs<- Sys.glob("*.png")
+move_files(pngs, doublet_path, overwrite = FALSE)
+
+# Move the csv files to the output folder
+csvs<- Sys.glob("*scores.csv")
+move_files(csvs, doublet_path, overwrite = FALSE)
+
+print(paste('Scrublet data and plots stored in:', doublet_path, sep = ' '))
+```

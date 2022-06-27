@@ -1,0 +1,355 @@
+---
+title: "19_snRNAseq_trajectory_analysis_v5"
+author: "Katie Prater and Kevin Green"
+date: "02/16/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(dplyr)
+library(slingshot)
+library(patchwork)
+library(magrittr)
+library(stringr)
+library(RColorBrewer)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Using Slingshot to perform trajectory analysis on a dataset
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that you want to use for trajectory analysis.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_20pcs_no-ref_APOE33.rdata"
+
+# Set the number of PCs that you want to use for your analysis
+pc_num <- 20
+
+# Set the resolution of clustering that you want to use
+change_resolution <- "0.3"
+
+# Set the cluster(s) you want to check for trajectories
+include_clusters <- c("1", "2", "3", "4", "5", "6", "8", "9")
+
+# Set the cluster you think the trajectory should start in (if known). Otherwise, NULL.
+start_cluster <- "1"
+
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("007")
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+  #make resolution name:
+  res_name<- paste0(assay, "_snn_res.", chose_resolution)
+
+  #Set cluster identities in Seurat object
+  Idents(object = ss_data_norm)<-res_name
+}
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Create output folder
+traj_path <- file.path(outpath, "umaps/trajectories/", fsep = "/")
+if (file.exists(traj_path)) {
+  cat("Trajectories directory path works!")
+} else {
+  cat("Trajectories directory does not exist - creating")
+  dir.create(traj_path)
+}
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(traj_path)))
+```
+
+## Extract the embeddings from the PCA and UMAP for the dataset.
+```{r Extract_Embeddings}
+# Ensure the assay is set to integrated so that you pull the appropriate data
+if (identical(assay, "integrated")){
+  DefaultAssay(ss_data_norm) <- assay
+} else {
+  DefaultAssay(ss_data_norm) <- "integrated"
+}
+
+# Check if the user asked for the dataset to be subset and do the subset
+if (is.character(include_clusters)) {
+  print("Subsetting seurat object by including clusters:")
+  print(include_clusters)
+  
+  # Subset the seurat object
+  ss_data <- subset(ss_data_norm, idents = include_clusters)
+
+} else {
+  print("Using whole dataset")
+  ss_data <- ss_data_norm
+}
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+  #make resolution name:
+  res_name<- paste0(assay, "_snn_res.", chose_resolution)
+
+  #Set cluster identities in Seurat object
+  Idents(object = ss_data)<-res_name
+}
+
+# Retrieve the PCA embeddings from the dataset.
+pca.data <- Embeddings(ss_data, reduction = "pca") 
+
+# Retrieve the UMAP embeddings from the dataset.
+umap.data <- Embeddings(ss_data, reduction = "umap") 
+
+# Retrieve the cluster ids for the dataset.
+subset.cluster.id <- factor(ss_data@active.ident) 
+#old_cluster_id <- ss_data$integrated_snn_res.0.3 ##** Hard Coded!
+
+# Get colors for plotting by using ggplot build
+# Generate the PCA plot, but save it as an object
+p =  PCAPlot(ss_data, combine = TRUE) 
+# Use ggplot_build to deconstruct the ggplot object
+pbuild <- ggplot2::ggplot_build(p) 
+# Pull the data used for the plot to use later
+pdata <- pbuild$data[[1]] 
+  
+```
+
+## Generate a trajectory and define pseudotime for all cells in your dataset.
+
+```{r Slingshot_Pseudotime}
+#################################################
+# Build functions to do pseudotime ordering
+ReversePseudotime = function(x) {
+    x_new = max(x) - x
+    x_new = x_new/max(x_new)
+    return(x_new)
+}
+
+AlignPseudotimeCC = function(x,subset.cluster.id,cluster.id.start1,cluster.id.start2) {
+
+    x_new <- x
+    
+    for(i in 1:length(x)){
+        member <- x[i]
+        
+        startVal = (median(x[subset.cluster.id==cluster.id.start1])+median(x[subset.cluster.id==cluster.id.start2]))/2
+            
+        if(member < startVal) {
+            member <- member + max(x)
+            x_new[i] <- member
+        }   
+    }
+     
+    x_new = max(x_new) - x_new
+    x_new = x_new/max(x_new)
+    return(x_new)
+}
+##########################################################
+
+if (!is.null(start_cluster)) {
+  print(paste("Running UMAP Slingshot with cluster", start_cluster, "as the start.", sep = " "))
+  
+  # Slingshot with UMAP extend Y
+  umapCoords <- as.matrix(cbind(umap.data[,1:2]))
+  
+  # Make minimum spanning tree for the dataset
+  lin_SSUMAP <- getLineages(umapCoords, subset.cluster.id, 
+                            start.clus = start_cluster)
+  print(lin_SSUMAP)
+  
+  # Plot the tree
+  plot(umapCoords, col = brewer.pal(9,"Set1")[subset.cluster.id], 
+                asp = 1, pch = 16) +
+    lines(lin_SSUMAP, lwd = 3, col = 'black')
+  #print(plot1)
+  #ggsave(filename = paste0(traj_path, "/", proj, "start_cluster_",
+  #                         start_cluster, "_slingshot_cluster_lineage_",
+  #                         suffix, ".png"),
+  #       height = 7, width = 11, plot = plot1)
+} else {
+  # Slingshot with UMAP extend Y
+  umapCoords <- as.matrix(cbind(umap.data[,1:2]))
+  
+  # Make minimum spanning tree for the dataset
+  lin_SSUMAP <- getLineages(umapCoords, subset.cluster.id)
+  print(lin_SSUMAP)
+  
+  # Plot the tree
+plot(umapCoords, col = brewer.pal(9,"Set1")[subset.cluster.id], 
+                asp = 1, pch = 16) +
+    lines(lin_SSUMAP, lwd = 3, col = 'black')
+  #ggsave(filename = paste0(traj_path, "/", proj,
+  #                         "unsupervised_slingshot_cluster_lineage_",
+  #                         suffix, ".png"),
+  #       height = 7, width = 11, plot = plot1)
+}
+
+for (lineage in 1:length(lin_SSUMAP@lineages)) {
+  plot(umapCoords, col = pdata$colour, asp = 1, pch = 20) + 
+    lines(lin_SSUMAP, linInd = lineage, lwd = 1, col = 'black', lty='solid')
+}
+
+crv_SSUMAP <- getCurves(lin_SSUMAP,extend="y", approx_points = 200)
+x_SSUMAP = slingPseudotime(crv_SSUMAP,na=F)[,1]
+
+plot(lin_SSUMAP, col = brewer.pal(9,"Set1")[subset.cluster.id], asp = 1, pch = 16) +
+lines(crv_SSUMAP, lwd = 3, col = 'black')
+
+#x_SSUMAP_new = ReversePseudotime(x_SSUMAP)
+
+#for (lineage in 1:length(crv_SSUMAP@lineages)) {
+  plot(umapCoords, col = pdata$colour, asp = 1, pch = 20) + 
+  lines(crv_SSUMAP, lwd = 1, col = 'black', lty='solid')
+  
+      #lines(slingCurves(crv_SSUMAP)$curve1, lwd = 1, col = "black",lty="solid")
+#}
+
+# Slingshot with PC Coords
+if (!is.null(start_cluster)) {
+  print(paste("Running PC Slingshot with cluster", start_cluster, "as the start.", sep = " "))
+
+  # Slingshot with PCs instead of UMAP
+  pcCoords <- as.matrix(cbind(pca.data[,1:15]))
+  
+  lin_SS02 <- getLineages(pcCoords, subset.cluster.id, 
+                            start.clus = start_cluster)
+  
+  print(lin_SS02)
+  
+  plot(pcCoords, col = brewer.pal(9,"Set1")[subset.cluster.id], 
+       asp = 1, pch = 16) +
+    lines(lin_SS02, lwd = 3, col = 'black')
+  
+  crv_SS02 <- getCurves(lin_SS02, extend="y", approx_points = 200)
+  x_SS02 = slingPseudotime(crv_SS02,na=F)[,1]
+  # Reverse the pseudotime ordering
+  x_SS02_new = ReversePseudotime(x_SS02)
+  
+  plot(pcCoords, col = pdata$colour, asp = 1, pch = 20) +
+    lines(crv_SS02, lwd = 1, col = "black",lty="solid")
+  
+  plot(x_SSUMAP,x_SS02_new,col = pdata$colour,xlab="Slingshot Pseudotime (UMAP)",ylab="Slingshot Pseudotime (PCA)")
+} else {
+  # Slingshot with PCs instead of UMAP
+  pcCoords <- as.matrix(cbind(pca.data[,1:15]))
+  
+  lin_SS02 <- getLineages(pcCoords, subset.cluster.id)
+  
+  print(lin_SS02)
+  
+  plot(pcCoords, col = brewer.pal(9,"Set1")[subset.cluster.id], 
+       asp = 1, pch = 16) +
+    lines(lin_SS02, lwd = 3, col = 'black')
+  
+  crv_SS02 <- getCurves(lin_SS02, extend="y", approx_points = 200)
+  x_SS02 = slingPseudotime(crv_SS02,na=F)[,1]
+  # Reverse the pseudotime ordering
+  x_SS02_new = ReversePseudotime(x_SS02)
+  
+  plot(pcCoords, col = pdata$colour, asp = 1, pch = 20) +
+    lines(crv_SS02, lwd = 1, col = "black",lty="solid")
+  
+  plot(x_SSUMAP,x_SS02_new,col = pdata$colour,xlab="Slingshot Pseudotime (UMAP)",ylab="Slingshot Pseudotime (PCA)")
+}
+
+for (lineage in 1:length(lin_SS02@lineages)) {
+  plot(pcCoords, col = pdata$colour, asp = 1, pch = 20) + 
+    lines(lin_SS02, linInd = lineage, lwd = 1, col = 'black', lty='solid')
+}
+  
+# closed principal curve with UMAP
+#crv_CCUMAP = principal_curve(umapCoords,smoother = "periodic_lowess")
+#x_CCUMAP = max(crv_CCUMAP$lambda)-crv_CCUMAP$lambda
+#x_CCUMAP_new = AlignPseudotimeCC(x_CCUMAP,subset.cluster.id,1,2)
+
+#plot(umapCoords, col = pdata$colour, asp = 1, pch = 20) + 
+#lines(crv_CCUMAP,lwd = 1, col = "black",lty="solid")
+
+# Send the pseudotime data back to the seurat object
+ss_data_norm <- AddMetaData(
+  object = ss_data_norm,
+  metadata = x_SSUMAP,
+  col.name = "slingshot_umap_pseudotime"
+)
+
+ss_data_norm <- AddMetaData(
+  object = ss_data_norm,
+  metadata = x_SS02_new,
+  col.name = "slingshot_PC_pseudotime"
+)
+
+# ss_data_norm <- AddMetaData(
+#   object = ss_data_norm,
+#   metadata = x_CCUMAP_new,
+#   col.name = "slingshot_CCUMAP_pseudotime"
+# )
+
+# Plot the pseudotime using Seurat functions
+FeaturePlot(ss_data_norm, "slingshot_umap_pseudotime", pt.size = 0.1) & scale_color_viridis_c()
+
+FeaturePlot(ss_data_norm, "slingshot_PC_pseudotime", pt.size = 0.1) & scale_color_viridis_c()
+
+```
+
+## Identify genes that are changing with pseudotime
+```{r Pseudotime_Genes}
+
+```
+
+
+## Save the data files.
+```{r Save_Files}
+# rm(star.less_tree_like, fit.less_tree_like, pc_num, change_resolution, include_clusters, genexp.fit, num_branches, in_rstudio)
+# # Save workspace image if needed to revisit
+# save.image(file = paste0(rfiles_path, "QCd_norm_anchored_clustered_trajectories_ws", suffix,
+#                          ".rdata"), compress = TRUE)
+```
+

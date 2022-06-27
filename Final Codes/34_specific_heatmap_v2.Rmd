@@ -1,0 +1,227 @@
+---
+title: "34_specific_heatmap_v1"
+author: "Katie Prater and Kevin Green"
+date: "8/14/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Seurat)
+library(pheatmap)
+library(png)
+library(RColorBrewer)
+library(dplyr)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Detection of Differential genes by cluster
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset with cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_20pcs_post-sub_no_ref.rdata"
+
+# Did you use Leiden as your clustering algorithm? (boolean):
+leiden_alg <- TRUE
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.3"
+
+# Remove clusters if necessary
+remove <-  c(11, 12)
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Tell the script whether to overwrite your output files (Boolean)
+overwrite <- TRUE
+  
+    # If overwrite = FALSE say what the new output should be called. If TRUE,
+    # leave as NULL
+    write_name <- "no_8"
+
+# Set which assay will be analyzed. Seurat recommends using the normalized data
+# from the "RNA" assay.
+DEG_assay <- "RNA"
+
+# Set the genelists that should be used to make heatmaps. These should be in
+# csvs, saved in the data folder
+genelists <- c("IRF7_up_geneset.csv", "IRF3_down_geneset.csv",
+               "IRF3_up_geneset.csv")
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("007")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+
+# First ensure that the idents are set to the resolution of clusters that you
+# want. Remake resolution name to ensure it's accurate:
+res_name <- paste0(assay, "_snn_res.", chose_resolution)
+  
+# Set cluster identities in Seurat object to the numbers from the resolution
+# you chose previously
+if (!exists("cluster_idents")){
+  Idents(object = ss_data_norm) <- res_name
+  cluster_idents <- sort(as.integer(unique(Idents(ss_data_norm))))
+}
+
+# Remove any unwanted clusters
+if (!is.null(remove)) {
+  ss_data_norm <- subset(ss_data_norm, ident = remove, invert = TRUE)
+}
+
+# Change the active assay to the assay to be evaluated for DEG
+DefaultAssay(ss_data_norm) <- DEG_assay
+
+# Normalize cells for read depth
+if (identical(DEG_assay, "RNA")) {
+  ss_data_norm <- NormalizeData(ss_data_norm, assay = "RNA")
+}
+
+set.seed(42)
+
+# Check if meta.data variables match gene names
+meta_data <- colnames(ss_data_norm@meta.data)
+all_genes <- row.names(ss_data_norm@assays$RNA@counts)
+while (any(meta_data %in% all_genes)) {
+  change <- meta_data[meta_data %in% all_genes][1]
+  warning(paste0("Changing the name of ", change, " metadata column to ",
+                 change, "_status"))
+  ss_data_norm@meta.data[[paste0(change, "_status")]] <- ss_data_norm@meta.data[[change]]
+  ss_data_norm@meta.data[[change]] <- NULL
+  meta_data <- colnames(ss_data_norm@meta.data)
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+# Set the file paths to DEG folder:
+DEG_path <- change_path(paste0(outpath, "DEG/"))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(DEG_path)))
+```
+
+```{r create_functions}
+colors <- colorRampPalette(c("blue", "white", "red"))
+all_genes <- rownames(ss_data_norm@assays$RNA@counts)
+
+plot_heatmap <- function(features, name) {
+  features <- features[features %in% all_genes]
+  ss_data_avg <- AverageExpression(ss_data_norm, features = features,
+                                 assays = "RNA", return.seurat = F)
+  columns <- 1:ncol(ss_data_avg$RNA) #c(1:7,9:10)    
+  ss_data_avg$RNA <- ss_data_avg$RNA[, paste(columns)]
+  # ss_data_avg <- as.data.frame(ss_data_avg$RNA)
+  # ss_data_avg.sort <- ss_data_avg[order(ss_data_avg[-1])]
+  plot2 <- pheatmap(ss_data_avg$RNA, 
+                    scale = "row",
+                    color = colors(200),
+                    annotation_names_col = FALSE,
+                    cluster_cols = F, cluster_rows = F,
+                    main = name)
+  if (overwrite){
+       ggsave(filename = paste0(DEG_path, name, "_heatmap_res.",
+                                chose_resolution, suffix, ".pdf"),
+              width = 7, height = length(features)/8, plot = plot2,
+              limitsize = FALSE)
+  } else {
+       ggsave(filename = paste0(DEG_path, write_name, "_", name,
+                                "_heatmap_res.", chose_resolution, suffix,
+                                ".pdf"),
+              width = 7, height = length(features)/8, plot = plot2,
+              limitsize = FALSE)
+  }
+}
+```
+
+## Calculate genes that differentiate each cluster from all other clusters.
+```{r Calc_Diff}
+# Set the file paths to DEG folder:
+DEG_path <- change_path(paste0(DEG_path, "heatmap_plots/"))
+
+# Set cluster identities in Seurat object to the numbers from the resolution
+# you chose previously
+Idents(object = ss_data_norm) <- res_name
+
+# Create geneset names from genelists
+geneset_names <- substr(genelists, 1, nchar(genelists)-4)
+
+for (list in 1:length(genelists)) {
+  genelist <- toupper(unlist(read.csv(paste0(datapath, genelists[[list]]))))
+  plot_heatmap(genelist, geneset_names[[list]])
+}
+```

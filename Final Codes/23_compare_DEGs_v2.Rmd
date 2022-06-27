@@ -1,0 +1,234 @@
+---
+title: "23_compare_DEGs_v2"
+author: "Kevin Green and Katie Prater"
+date: "3/9/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Matrix)
+library(VennDiagram)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Identification of clusters by published clusters
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the csvs with DEGs and reference gene list.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Set the path to the folder containing DEG csvs that are to be compared to
+# published DEGs. Must begin with the "output_yyyymmdd" folder
+# (e.g. "output_20201208/DEG/cluster_to_cluster/")
+csv_path <- "output_post-sub_no_ref/DEG/cluster_to_allclusters/"
+  
+# Provide the pattern of csv naming using regex characters
+# If csv contains multiple clusters, do only one csv at a time
+csv_pattern <- "_mast_top_genes_per_cluster_compared_all_res_0.5"
+
+# Set the csv containing published genelists (must be in "data" folder)
+ref <- "22_samp_clust_to_clust_ref.csv"
+
+# Set the suffix for these DEG lists
+suffix <- "SubsetClust1_to_AllClusterTo1"
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Check if csv exists
+csv_path <- paste0("../output/", csv_path)
+if (!dir.exists(paste0(csv_path))) {
+  stop(paste(csv_path, "not found"))
+}
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# # Print container package versions, if changed from previous
+# if (!identical(params$container, prev_container)) {
+#   print("This code was run using:")
+#   print(sessionInfo())
+#   prev_container <- params$container
+# }
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("007")
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+```
+
+```{r read_csvs}
+# Set output path
+compare_path <- change_path(paste0(csv_path, "compare", suffix, "/"))
+# Set the file paths to overlapping genelist folder:
+over_path <- change_path(paste0(compare_path, "overlapping_genelists/"))
+# Set the file paths to venn diagram folder:
+venn_path <- change_path(paste0(compare_path, "venn_diagrams/"))
+
+# Turn off log files for venn diagrams
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+
+# Read in csvs
+ref <- read.csv(paste0("../data/", ref))
+csvs <- list.files(path = csv_path, pattern = csv_pattern)
+for (csv in 1:length(csvs)) {
+  assign(paste0("genelist", csv), read.csv(paste0(csv_path, csvs[csv])))
+}
+
+# Make the deg_clust object so that it exists.
+deg_clust <- NULL
+
+if (!is.null(genelist1$cluster)) {
+  csv_file <- paste0(csv_path, csvs)
+  # Subset DEG data into cluster gene lists
+  deg_clust <- genelist1 %>%  group_by(cluster) %>%
+               group_split(.keep = TRUE)
+  csvs <- NULL
+  for (list in 1:length(deg_clust)) {
+    assign(paste0("genelist", list), deg_clust[[list]])
+    csvs <- c(csvs, paste0("cluster_", deg_clust[[list]]$cluster[1]))
+  }
+}
+
+new_csv <- NULL
+```
+
+```{r Compare_DEGs}
+# Find unique genes and write to a csv
+for (csv in 1:length(csvs)) {
+  for (other in 1:ncol(ref)) {
+    list1 <- get(paste0("genelist", csv))
+    if (is.null(list1$gene)) {
+      if (!is.null(list1$row)) {
+        list1 <- rename(list1, gene = row)
+        list1$X <- NULL
+      } else {
+        list1 <- rename(list1, gene = X)
+      }
+    }
+    if (!is.null(list1$log2FoldChange)) {
+      list1 <- rename(list1, avg_logFC = log2FoldChange)
+    }
+    list1[colnames(ref)[other]] <- ""
+    list2 <- ref[-1,other]
+    list2 <- toupper(list2[!list2 %in% ""])
+    if (!is.null(list1$avg_logFC)) {
+      list1down <- list1[list1$avg_logFC < 0,]
+      # Make venn diagrams
+      venn.diagram(x = list(list1down$gene, list2),
+                   category.names = c(csvs[csv], colnames(ref)[other]),
+                   filename = paste0(venn_path, "down_reg_cluster_",
+                                     csvs[csv], "_vs_", colnames(ref)[other],
+                                     "_venn_diagram", suffix, ".png"),
+                   output=TRUE,
+                   imagetype="png" ,
+                   height = 700 , 
+                   width = 700 , 
+                   resolution = 300,
+                   compression = "lzw",
+                   lwd = 1,
+                   col=c("#440154ff", '#21908dff'), #, '#fde725ff'),
+                   fill = c(alpha("#440154ff",0.3), alpha('#21908dff',0.3)),
+                            # alpha('#fde725ff',0.3)),
+                   cex = 0.5,
+                   fontfamily = "sans",
+                   cat.cex = 0.3,
+                   cat.default.pos = "outer",
+                   cat.pos = c(-27, 27), # 135),
+                   cat.dist = c(0.055, 0.055), # 0.085),
+                   cat.fontfamily = "sans",
+                   cat.col = c("#440154ff", '#21908dff'), # '#fde725ff'),
+                   )
+      
+      overlap_genes <- subset(list1down,
+                              (list1down$gene %in% list2))[["gene"]]
+      # overlap_genes <- grep(list1, list2, ignore.case = T, value = T)
+      per <- toString(round(length(overlap_genes)/nrow(list1down) * 100,
+                            digits = 1))
+      list1[[colnames(ref)[other]]][list1$gene %in% overlap_genes] <-
+        toString(ref[[other]][1])
+      # Write the genes to a csv file.
+      write.csv(overlap_genes, paste0(over_path, per, "_percent_down_",
+                                      colnames(ref)[other], "_vs_", csvs[csv],
+                                      suffix, ".csv"), row.names = FALSE)
+    }
+    
+    list1up <- list1[list1$avg_logFC > 0,]
+
+    # Make venn diagrams
+    venn.diagram(x = list(list1up$gene, list2),
+                 category.names = c(csvs[csv], colnames(ref)[other]),
+                 filename = paste0(venn_path, "up_reg_cluster_",
+                                     csvs[csv], "_vs_", colnames(ref)[other],
+                                     "_venn_diagram", suffix, ".png"),
+                 output=TRUE,
+                 imagetype="png" ,
+                 height = 700 , 
+                 width = 700 , 
+                 resolution = 300,
+                 compression = "lzw",
+                 lwd = 1,
+                 col=c("#440154ff", '#21908dff'), #, '#fde725ff'),
+                 fill = c(alpha("#440154ff",0.3), alpha('#21908dff',0.3)),
+                          # alpha('#fde725ff',0.3)),
+                 cex = 0.5,
+                 fontfamily = "sans",
+                 cat.cex = 0.3,
+                 cat.default.pos = "outer",
+                 cat.pos = c(-27, 27), # 135),
+                 cat.dist = c(0.055, 0.055), # 0.085),
+                 cat.fontfamily = "sans",
+                 cat.col = c("#440154ff", '#21908dff'), # '#fde725ff'),
+                 )
+    
+    overlap_genes <- subset(list1up,
+                            (list1up$gene %in% list2))[["gene"]]
+    list1[[colnames(ref)[other]]][list1$gene %in% overlap_genes] <-
+      toString(ref[[other]][1])
+    # overlap_genes <- grep(list1, list2, ignore.case = T, value = T)
+    per <- round(length(overlap_genes)/nrow(list1up) * 100, digits = 1)
+    # Write the genes to a csv file.
+    write.csv(overlap_genes, paste0(over_path, per, "_percent_up_",
+                                    colnames(ref)[other], "_vs_", csvs[csv],
+                                    suffix, ".csv"), row.names = FALSE)
+    assign(paste0("genelist", csv), list1)
+  }
+  if (!is.null(deg_clust)) {
+    new_csv <- rbind(new_csv, get(paste0("genelist", csv)))
+  } else {
+    write.csv(get(paste0("genelist", csv)), paste0(compare_path, csvs[csv]))
+  }
+}
+if (!is.null(deg_clust)) {
+  write.csv(new_csv, paste0(compare_path, basename(csv_file)))
+}
+```

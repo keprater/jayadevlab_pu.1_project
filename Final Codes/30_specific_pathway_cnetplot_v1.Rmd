@@ -1,0 +1,211 @@
+---
+title: "30_specific_pathway_cnetplot_v1"
+author: "Kevin Green and Katie Prater"
+date: "3/9/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Matrix)
+library(Seurat)
+library(scater)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(magrittr)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(png)
+library(data.table)
+library(clusterProfiler)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Detection of Differential genes by pseudobulk analysis
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset with cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "pseudobulk_ws_no-ref_APOE33.rdata"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Set cluster name(s) that need to be analyzed
+clusters <- c("1")
+
+# Set the csv files containing the pathways you wish to plot.
+# Please put the csv in the data folder of the project
+pathway_csv <- c("cluster_1_22samp_int.csv")
+
+# Set which database contains the pathways in the pathway_csv. ("react", "kegg",
+# or "wp")
+db <- "react"
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.4"
+
+# Set which linear model will be plotted
+effect <- "Study_DesignationAD"
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Check if csv exists
+if (!file.exists(paste0("../data/", pathway_csv))) {
+  stop(paste(pathway_csv, "not found"))
+}
+
+if (length(pathway_csv) != length(clusters)) {
+  stop("Length of clusters must match the length of pathway_csv")
+}
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("007")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+# Set random seed for reproducibility
+set.seed(42)
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+outpath <- change_path(outpath)
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+# Set the DEG folder
+DEG_path <- change_path(paste0(outpath,
+                               "/DEG/pseudobulk_by_group/Wald/"))
+```
+
+``` {r plots}
+# Create pathway variable for pathway database being analyzed
+pathway <- paste0("pathways_", db)
+
+# Set plots path
+plots_path <- paste0(DEG_path, "plots/")
+cnet_path <- change_path(paste0(plots_path, "cnet/"))
+chart_path <- change_path(paste0(plots_path, "pathway_charts/"))
+
+for (cluster in 1:length(clusters)) {
+  # Read in pathways from the given csv
+  paths_of_int <- read.csv(paste0("../data/", pathway_csv[cluster]),
+                           header = FALSE)
+
+  # Remove unwanted pathways
+  gsea_results <- get(paste0("gsea_results_", clusters[cluster], "_", pathway,
+                             "_", effect))
+  gsea_results@result <- gsea_results@result[gsea_results@result$ID %in%
+                                               paths_of_int[,1],]
+  
+  # Plot the cnet plot of the given pathways
+  plot1 <- cnetplot(gsea_results, categorySize = "pvalue",
+                    showCategory = nrow(gsea_results),
+                    foldChange = gsea_results@geneList)
+  min.value <- min(plot1$data$color, na.rm = TRUE)
+  max.value <- max(plot1$data$color, na.rm = TRUE)
+  plot1 <- plot1 + scale_colour_gradient2(name = "fold change", low = "blue",
+                                          mid = "light gray", high = "red",
+                                          limits = c(min.value, max.value),
+                                          breaks = c(min.value , 0, max.value)) +
+           labs(title = paste(pathway, effect))
+  print(plot1)
+  ggsave(filename = paste0(cnet_path, clusters[cluster], "_cnet_", pathway, "_",
+                           effect, "_res.", chose_resolution, suffix, ".svg"),
+         height = 14, width = 20, plot = plot1)
+  ggsave(filename = paste0(cnet_path, clusters[cluster], "_cnet_", pathway, "_",
+                           effect, "_res.", chose_resolution, suffix, ".png"),
+         height = 14, width = 20, plot = plot1)
+  
+  # Create bar chart of chosen pathways
+  gsea_results@result$Description <- sub(".*?_", "",
+                                         gsea_results@result$Description)
+  gsea_results@result$Description <- substr(gsea_results@result$Description,
+                                            1, 50)
+  gsea_plot <- ggplot(gsea_results@result, aes(reorder(Description, NES), NES)) +
+                      geom_col(aes(fill = NES > 0)) +
+                      scale_fill_manual(values = c("#a6a6a6", "#5a5a5a")) +
+                      coord_flip() +
+                      theme_bw(base_size=22, base_line_size = 0,
+                               base_rect_size = 0) +
+                      theme(legend.position = "none") +
+                      labs(x="Pathway", y="Normalized Enrichment Score",
+                           title= paste(pathway, "Enriched", effect))
+  print(gsea_plot)
+  ggsave(filename = paste0(chart_path, clusters[cluster], "_chosen_", pathway,
+                           "_chart_", effect, "_res.", chose_resolution,
+                           suffix, ".svg"),
+         height = 14, width = 20, plot = gsea_plot)
+  ggsave(filename = paste0(chart_path, clusters[cluster], "_chosen_", pathway,
+                           "_chart_", effect, "_res.", chose_resolution,
+                           suffix, ".png"),
+         height = 14, width = 20, plot = gsea_plot)
+}
+```

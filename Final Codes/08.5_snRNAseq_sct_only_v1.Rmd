@@ -1,0 +1,221 @@
+---
+title: "08.5_snRNAseq_sct_only_v1"
+author: "Katie Prater and Kevin Green"
+date: "6/24/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(dplyr)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+### Removal of unwanted batch/sample effects, normalization, and pca
+### reduction for cleanup of data
+## (but no regression for population variables of no interest - those come
+## afterward on the whole dataset)
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that needs to be normalized.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Name of the Rdata file to load in:
+start_data <- "QCd_norm_harmony_ws_20210331.rdata"
+
+# Define the number of genes you want after variable gene detection:
+nfeatures <- 5000
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+Sys.umask("000")
+
+# Create UMAPs folder
+umaps_path <- file.path(outpath, "umaps", fsep = "/")
+if (file.exists(umaps_path)) {
+  cat("umaps directory path works!")
+} else {
+  cat("umaps directory does not exist - creating")
+  dir.create(umaps_path)
+}
+
+set.seed(42)
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+```
+
+## Make a couple of quick umap plots to confirm that the batch correction worked
+## well.
+```{r UMAP_plot}
+# Set default assay
+DefaultAssay(ss_data_norm) <- "SCT"
+
+# Run UMAP to get the data
+ss_data_norm <- RunUMAP(ss_data_norm, reduction = "pca", dims = 1:30)
+
+# Create UMAPs folder
+umaps_path <- file.path(outpath, "umaps/postSCT/", fsep = "/")
+if (file.exists(umaps_path)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(umaps_path)
+}
+
+# Next, switch the identity class of all cells to reflect sample ID
+Idents(ss_data_norm) <- "orig.ident"
+
+# Make a standard UMAP plot of the clusters
+plot2 <- DimPlot(object = ss_data_norm,
+                     pt.size = 1,
+                     label = FALSE,
+                     label.size = 10)
+plot2[[1]]$layers[[1]]$aes_params$alpha = .2
+print(plot2)
+ggsave(filename = paste0(umaps_path, "sct_only_samples_postQC", suffix,
+                         ".png"), height = 8, width = 8, plot = plot2)
+    
+# Make a standard UMAP plot of the clusters by sample
+plot3 <- DimPlot(object = ss_data_norm,
+                     split.by = "orig.ident",
+                     pt.size = 1,
+                     label = FALSE,
+                     label.size = 10,
+                     ncol = 5)
+print(plot3)
+ggsave(filename = paste0(umaps_path, "sct_only_samples_split_postQC",
+                         suffix, ".png"),
+       height = 12, width = 12, plot = plot3)
+
+# Make a standard UMAP plot of the clusters by sample after SCTransform
+# Get dataset to use ggplot instead of Seurat functions.
+class_umap_data <- FetchData(ss_data_norm,
+                             vars = c("ident", "UMAP_1", "UMAP_2",
+                                      "Study_Designation"))
+list_idents <- unique(class_umap_data$ident)
+
+# Make UMAP overlay of each sample on top of the overall dataset
+for (sample in 1:length(list_idents)) {
+  subset_sample_data <- class_umap_data %>% filter(ident == list_idents[sample])
+  plotname <- paste0("plot_", sample)
+  assign(plotname, ggplot(data = class_umap_data, aes(x = UMAP_1, y = UMAP_2)) + 
+    geom_point(alpha = 0.25, size = 0.01, colour = "grey") + 
+    geom_point(data = subset_sample_data, alpha = 0.25, size = 0.01,
+               colour = "blue") + 
+    theme_bw() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line = element_line(colour = "black"))
+  )
+  ggsave(filename = paste0(umaps_path, "umaps_postSCT_sct_only_sample_", sample,
+                           suffix, ".png"),
+       height = 12, width = 12, plot = get(plotname))
+}
+
+# Combine plots into one image object and save it
+plot_name <- rep(NA, length(list_idents))
+for (plots in 1:length(list_idents)) {
+  plot_name[plots] <- paste0("plot_", plots)
+}
+plots <- paste(plot_name[1:length(list_idents)], collapse = " + ")
+all_plots <- eval(str2expression(plots))
+ggsave(filename = paste0(umaps_path, "umaps_all_samples_postSCT_sct_only", 
+                         suffix, ".png"),
+       height = 12, width = 12, plot = all_plots)
+
+# Make UMAP overlay of each sample on top of the overall dataset
+for (sample in 1:length(list_idents)) {
+  subset_sample_data <- class_umap_data %>% filter(ident == list_idents[sample])
+  if (subset_sample_data$Study_Designation == "AD") {
+    plotname <- paste0("plot_", sample)
+    assign(plotname, ggplot(data = class_umap_data, aes(x = UMAP_1, y = UMAP_2)) + 
+      geom_point(alpha = 0.25, size = 0.01, colour = "grey") + 
+      geom_point(data = subset_sample_data, alpha = 0.25, size = 0.01,
+                 colour = "red") + 
+      theme_bw() + 
+      theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            axis.line = element_line(colour = "black"))
+    )
+    ggsave(filename = paste0(umaps_path, "umaps_postSCT_sct_only_red_sample_", sample,
+                             suffix, ".png"),
+         height = 12, width = 12, plot = get(plotname))
+  }
+}
+
+# Combine plots into one image object and save it
+plot_name <- rep(NA, length(list_idents))
+for (plots in 1:length(list_idents)) {
+  plot_name[plots] <- paste0("plot_", plots)
+}
+plots <- paste(plot_name[1:length(list_idents)], collapse = " + ")
+all_plots <- eval(str2expression(plots))
+ggsave(filename = paste0(umaps_path, "umaps_all_samples_postSCT_sct_only_by_Study_Designation", 
+                         suffix, ".png"),
+       height = 12, width = 12, plot = all_plots)
+
+# Clean up variables and objects
+objs <- ls()
+objects_to_remove <- c(grep('plot_', objs, value = TRUE))
+rm(list = objects_to_remove)
+rm(ss_data_pca, class_umap_data, list_idents, subset_sample_data, sample,
+   plotname, plot_name, plots, all_plots)
+
+# Save umaps_path variable as path to generic umaps folder for future use.
+umaps_path <- file.path(outpath, "umaps/", fsep = "/")
+```
+
+## Save the data files.
+```{r Save_Files}
+# Remove objects that are no longer needed
+rm(sample_sub, use_reference, reference_samples, reference_samples2, params,
+   nfeatures, plot1, plot2, plot3, unwanted, variance, variances, start_data)
+
+# Save workspace image if needed to revisit
+save.image(file = paste0(rfiles_path, "QCd_norm_sct_only_ws", suffix, ".rdata"),
+           compress = TRUE)
+```

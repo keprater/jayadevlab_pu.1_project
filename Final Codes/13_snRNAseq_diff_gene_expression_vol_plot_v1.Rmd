@@ -1,0 +1,559 @@
+---
+title: "13_snRNAseq_diff_gene_expression_vol_plot_v1"
+author: "Katie Prater and Kevin Green"
+date: "8/14/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Seurat)
+library(Matrix)
+library(patchwork)
+library(scater)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(magrittr)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(apeglm)
+library(png)
+library(DESeq2)
+library(RColorBrewer)
+library(clusterProfiler)
+library(data.table)
+library(ggrepel)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Detection of Differential genes by cluster
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset with cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_15pcs_mg_only_refSCT_20210331.rdata"
+
+# Did you use Leiden as your clustering algorithm? (boolean):
+leiden_alg <- TRUE
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.3"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Set the sample ID meta-data variable name
+ID <- "Pt_ID"
+
+# Tell the script whether to overwrite your output files (Boolean)
+overwrite <- FALSE
+  
+    # If overwrite = FALSE say what the new output should be called. If TRUE,
+    # leave as NULL
+    write_name <- "vol_plot_test" #"with_gsea"
+
+# Set which assay will be analyzed. Seurat recommends using the normalized data
+# from the "RNA" assay.
+DEG_assay <- "RNA"
+
+# Choose which DEG tests to run_-----------------------------------------------
+
+  # Analyze all cells by specific grouping variable (i.e. a metadata variable)? -
+  # Boolean
+  all_cells_by_group <- FALSE
+  
+  # Analyze cells within specific cluster by a grouping variable (i.e. a
+  # metadata variable)? - Boolean
+  cluster_by_group <- FALSE
+  
+  # Analyze each cluster compared to all other clusters? - Boolean
+  clust_to_all_clust <- FALSE
+  
+  # Analyze each cluster compared to specific cluster(s)? - Boolean
+  clust_to_specific_clust <- TRUE
+  
+    # clust_to_specific_clust requires setting which clusters will be compared.
+    # The user can compare one or more clusters to one or more base clusters.
+    # All comparison clusters will be compared to each base cluster.
+    # Set which cluster to compare to other cluster(s)
+    base_clust <- c(1)
+    comp_clust <- c(3) #c(3, 4, 5, 6, 7, 9, 10)
+    
+#------------------------------------------------------------------------------
+
+# Set parameters for all DEG test(s) below-------------------------------------
+  # If clust_by_group, all_cells_by_group, or pseudo is TRUE, set variables in
+  # your metadata to group the cluster numbers by (must match variable names in
+  # metadata). Otherwise, NULL.
+  meta_vars <- "Study_Designation"
+  
+  # Choose one value from the chosen each metadata variable to compare others
+  # against; otherwise, NULL. ident_to_use LIST SIZE MUST EQUAL meta_vars SIZE. 
+  ident_to_use <- "Ctrl"
+  
+  # Choose which DEG test to use (e.g. "MAST", "wilcox", "DESeq2", "negbinom")
+  DEG_test <- "MAST"
+  
+  # Choose the minimum fraction of cells to express a gene, in either group
+  # being tested, for the gene to be tested 
+  min_pct <- 0.05 #0.1
+  
+  # Choose the minimum fold change of a gene, in either group being tested, for
+  # the gene to be tested. Fold change is expressed as natural log.
+  # (0.405 ~ 1.5 increase, 0.22 ~ 1.25 increase)
+  ln_threshold <- 0.22
+  
+  # Should GSEA be run?
+  # .gmt files must be in the data folder
+  GSEA <- FALSE
+  
+#------------------------------------------------------------------------------
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+if (length(meta_vars) != length(ident_to_use)) {
+  stop("meta_vars and ident_to_use must be lists of the same length")
+}
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("000")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+# Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+
+# First ensure that the idents are set to the resolution of clusters that you
+# want. Remake resolution name to ensure it's accurate:
+res_name <- paste0(assay, "_snn_res.", chose_resolution)
+  
+# Set cluster identities in Seurat object to the numbers from the resolution
+# you chose previously
+if (!exists("cluster_idents")){
+  Idents(object = ss_data_norm) <- res_name
+  cluster_idents <- sort(as.integer(unique(Idents(ss_data_norm))))
+} 
+
+
+# Change the active assay to the assay to be evaluated for DEG
+DefaultAssay(ss_data_norm) <- DEG_assay
+
+# Normalize cells for read depth
+if (identical(DEG_assay, "RNA")) {
+  ss_data_norm <- NormalizeData(ss_data_norm, assay = "RNA")
+}
+
+set.seed(42)
+
+# Check if meta.data variables match gene names
+meta_data <- colnames(ss_data_norm@meta.data)
+all_genes <- row.names(ss_data_norm@assays$RNA@counts)
+while (any(meta_data %in% all_genes)) {
+  change <- meta_data[meta_data %in% all_genes][1]
+  warning(paste0("Changing the name of ", change, " metadata column to ",
+                 change, "_status"))
+  ss_data_norm@meta.data[[paste0(change, "_status")]] <- ss_data_norm@meta.data[[change]]
+  ss_data_norm@meta.data[[change]] <- NULL
+  meta_data <- colnames(ss_data_norm@meta.data)
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+# Set the file paths to DEG folder:
+DEG_path <- change_path(paste0(outpath, "DEG/"))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(DEG_path)))
+```
+
+```{r create_functions}
+# Set genelists
+genelists <- c("top10_genes", "bottom10_genes")
+
+plot_vol <- function(markers, type) {
+  markers$gene <- row.names(markers)
+  markers <- remove_zeros(markers)
+  markers <- transform(markers, xjit=jitter(avg_logFC),
+                       yjit = jitter(-log10(p_val_adj), amount = 10))
+  top_genes <- top_n(markers, n = 10, wt = avg_logFC)
+  top_genes <- rbind(top_genes, top_n(markers, n = -10, wt = avg_logFC))
+  # Create the volcano plot
+  vol_plot <- ggplot(markers) + 
+              geom_jitter(aes(x = avg_logFC, y = -log10(p_val_adj),
+                             color = p_val_adj < 0.05 &
+                                       abs(avg_logFC) > ln_threshold),
+                          width = .05, height = .05) + 
+              scale_color_manual(values = c("black", "blue")) +
+              xlab("log2 fold change") + 
+              ylab("-log10 adjusted p-value") +
+              plot_annotation(title = type) +
+              geom_text_repel(data=top_genes,
+                              aes(x = avg_logFC, y = -log10(p_val_adj),
+                                  label=gene)) +
+              scale_y_continuous(trans="log10") +
+              theme(legend.position = "none", 
+                    plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+                    axis.title = element_text(size = rel(1.25)),
+                    panel.grid.major = element_blank(),
+                    panel.grid.minor = element_blank(),
+                    panel.background = element_blank(),
+                    axis.line = element_line(colour = "black"))
+  print(vol_plot)
+  if (overwrite){
+    ggsave(filename = paste0(vol_path, "DEG_vol_plot_", type, "_", DEG_assay,
+                           "_", DEG_test, "_res.", chose_resolution, "_", 
+                           suffix, ".svg"),
+             height = 7, width = 7, plot = vol_plot)
+  } else {
+    ggsave(filename = paste0(vol_path, write_name, "DEG_vol_plot_", type, "_",
+                             DEG_assay, "_", DEG_test, "_res.",
+                             chose_resolution, "_", suffix, ".svg"),
+             height = 7, width = 7, plot = vol_plot)
+  }
+}
+colors <- colorRampPalette(c("blue", "white", "red"))
+
+remove_zeros <- function(markers) {
+  p_val <- NULL
+  row <- 1
+  while(markers$p_val_adj[row] == 0) {
+    row <- row + 1
+    p_val <- markers$p_val_adj[row]
+  }
+  while(row > 0) {
+    markers$p_val_adj[row] <- markers$p_val_adj[row + 1] * 0.99
+    row <- row - 1
+  }
+  return(markers)
+}
+
+# remove_zeros <- function(marker_list, row) {
+#   if (is.null(marker_list$p_val_adj[row + 1])) {
+#     marker_list$p_val_adj[row] <- 1 * 10**(-250)
+#   } else if (marker_list$p_val_adj[row] == 0) {
+#     marker_list <- remove_zeros(marker_list, row + 1)
+#   }
+#   marker_list$p_val_adj[row] <- marker_list$p_val_adj[row + 1] * .99
+#   return(marker_list)
+# }
+```
+
+```{r Group_DEG}
+# Find genes that are differentially expressed in between groups using all cells
+if (all_cells_by_group) {
+  
+  # Set the file paths to DEG folders:
+  DEG_path <- change_path(paste0(outpath, "/DEG/all_clusters_by_group/"))
+  vln_path <- change_path(paste0(DEG_path, "vln_plots/"))
+  vol_path <- change_path(paste0(DEG_path, "vol_plots/"))
+  heat_path <- change_path(paste0(DEG_path, "heatmap_plots/"))
+  
+  # Do DEG analysis:
+  for (group in 1:length(meta_vars)) {
+    print(paste('Finding genes that differentiate groups defined by:',
+                meta_vars[group]))
+    group_markers <- FindMarkers(ss_data_norm,
+                                 group.by = meta_vars[group],
+                                 ident.1 = ident_to_use[group],
+                                 test.use = DEG_test,
+                                 min.pct = min_pct,
+                                 logfc.threshold = 0.000001)
+    plot_vol(group_markers, meta_vars[group])
+    # Write the genes to a csv file.
+    if (overwrite) {
+      write.csv(group_markers,
+              paste0(DEG_path, "full_genelist_group_", meta_vars[group], "_",
+                     DEG_test, "_min.", min_pct, "_res.", chose_resolution,
+                     suffix, ".csv"), row.names = TRUE)
+    } else {
+      write.csv(group_markers,
+              paste0(DEG_path, write_name, "full_genelist_group_",
+                     meta_vars[group], "_", DEG_test, "_min.", min_pct,
+                     "_res.", chose_resolution, suffix, ".csv"), 
+              row.names = TRUE)
+    }
+    
+    group_markers <- group_markers[group_markers$p_val_adj < 0.05,]
+    group_markers <- filter(group_markers,
+                            abs(group_markers$avg_logFC) > ln_threshold)
+    print(head(group_markers, n=20))
+    top10_genes <- row.names(top_n(group_markers, n = 10, wt = avg_logFC))
+    bottom10_genes <- row.names(top_n(group_markers, n = -10, wt = avg_logFC))
+    
+    # Create violin plots for top and bottom differentially expressed genes
+    # if(identical(DEG_test, "MAST")) {
+    #   MAST_plots(ss_data_norm, meta_vars[group], ident_to_use[group], NULL,
+    #              meta_vars[group])
+    # }
+    plot_vln(ss_data_norm, NULL, meta_vars[group], meta_vars[group])
+      
+    # Write the genes to a csv file.
+    if (overwrite){
+        write.csv(group_markers,
+              paste0(DEG_path, "DEGs_group_", meta_vars[group], "_", DEG_test,
+                     "_min.", min_pct, "_res.", chose_resolution, suffix,
+                     ".csv"), row.names = TRUE)
+    } else {
+        write.csv(group_markers,
+              paste0(DEG_path, write_name, "DEGs_group_", meta_vars[group],
+                     "_", DEG_test, "_min.", min_pct, "_res.",
+                     chose_resolution, suffix, ".csv"), row.names = TRUE)
+    }
+  }
+}
+```
+
+```{r Within_cluster_DEG}
+# Find genes that are differentially expressed in between groups within specific
+# clusters
+if (cluster_by_group) {
+  # Set the file paths to DEG folders:
+  DEG_path <- change_path(paste0(outpath, "/DEG/cluster_by_group/"))
+  vln_path <- change_path(paste0(DEG_path, "vln_plots/"))
+  vol_path <- change_path(paste0(DEG_path, "vol_plots/"))
+  heat_path <- change_path(paste0(DEG_path, "heatmap_plots/"))
+  
+  # Do the DEG analysis:
+  for (ident in 1:length(cluster_idents)) {
+    for (group in 1:length(meta_vars)) {
+      if (!exists("cluster_idents")) {
+         cluster_idents <- Idents(ss_data_norm)
+      }
+      print(paste('Finding genes that differentiate groups defined by:',
+                  meta_vars[group], 'within', cluster_idents[[ident]]))
+      cluster <- subset(ss_data_norm, idents = cluster_idents[[ident]])
+      group_markers <- FindMarkers(object = cluster,
+                                   group.by = meta_vars[group],
+                                   ident.1 = ident_to_use[group],
+                                   test.use = DEG_test,
+                                   min.pct = min_pct,
+                                   logfc.threshold = 0.000001)
+      plot_vol(group_markers, paste0(cluster_idents[ident], "_by_",
+                                     meta_vars[group]))
+      if (overwrite) {
+          write.csv(group_markers,
+                paste0(DEG_path, "full_genelist_", cluster_idents[[ident]],
+                       "_group_", meta_vars[group], "_", DEG_test, "_min.",
+                       min_pct, "_res.", chose_resolution, suffix, ".csv"),
+                row.names = TRUE)
+      } else {
+          write.csv(group_markers,
+                paste0(DEG_path, write_name, "full_genelist_",
+                       cluster_idents[[ident]],
+                       "_group_", meta_vars[group], "_", DEG_test, "_min.",
+                       min_pct, "_res.", chose_resolution, suffix, ".csv"),
+                row.names = TRUE)        
+      }
+
+
+      group_markers <- group_markers[group_markers$p_val_adj < 0.05,]
+      group_markers <- filter(group_markers,
+                              abs(group_markers$avg_logFC) > ln_threshold)
+      print(head(group_markers, n=20))
+      top10_genes <- row.names(top_n(group_markers, n = 10, wt = avg_logFC))
+      bottom10_genes <- row.names(top_n(group_markers, n = -10, wt = avg_logFC))
+      
+      # Create violin plots for top and bottom differentially expressed genes
+      # if(identical(DEG_test, "MAST")) {
+      #   MAST_plots(cluster, meta_vars[group], ident_to_use[group], NULL,
+      #              cluster_idents[ident])
+      # }
+      plot_vln(cluster, NULL, meta_vars[group], cluster_idents[ident])
+      # Write the genes to a csv file.
+      if (overwrite) {
+          write.csv(group_markers,
+                paste0(DEG_path, "DEGs_", cluster_idents[[ident]], "_group_", 
+                       meta_vars[group], "_", DEG_test, "_min.", min_pct,
+                       "_res.", chose_resolution, suffix, ".csv"),
+                row.names = TRUE)
+      } else {
+          write.csv(group_markers,
+                paste0(DEG_path, write_name, "DEGs_", cluster_idents[[ident]],
+                       "_group_", meta_vars[group], "_", DEG_test, "_min.",
+                       min_pct, "_res.", chose_resolution, suffix, ".csv"),
+                row.names = TRUE)
+      }
+
+    }
+  }
+}
+```
+
+```{r cluster_to_cluster_DEG}
+# Find genes that are differentially expressed in between clusters
+if (clust_to_specific_clust) {
+  DEG_path <- change_path(paste0(outpath, "/DEG/cluster_to_cluster/"))
+  vln_path <- change_path(paste0(DEG_path, "vln_plots/"))
+  vol_path <- change_path(paste0(DEG_path, "vol_plots/"))
+  heat_path <- change_path(paste0(DEG_path, "heatmap_plots/"))
+  gsea_path <- change_path(paste0(DEG_path, "gsea/"))
+  plots_path <- change_path(paste0(gsea_path, "plots/"))
+  
+  # Set Idents to resolution (clusters are named with numbers)
+  Idents(object = ss_data_norm) <- res_name
+  
+  # Set up variable to store comparisons performed
+  comps <- NULL
+  
+  # Do the DEG analysis:
+  for (index in 1:length(base_clust)) {
+    for (cluster in length(comp_clust):1) {
+      if (comp_clust[cluster] != base_clust[index] &
+          !(paste0(cluster, "v", index) %in% comps)) {
+        comps <- c(comps, paste0(index, "v", cluster))
+        print(paste('Finding genes that differentiate',
+                    cluster_idents[base_clust[index] + 1 - as.integer(leiden_alg)],
+                    'and', cluster_idents[comp_clust[cluster] + 1 -
+                                            as.integer(leiden_alg)]))
+        group_markers <- FindMarkers(ss_data_norm,
+                                     group.by = res_name,
+                                     ident.1 = comp_clust[cluster],
+                                     ident.2 = base_clust[index],
+                                     test.use = DEG_test,
+                                     min.pct = min_pct,
+                                     logfc.threshold = 0)
+        
+        # Write the top cluster genes to a csv file.
+        if (overwrite){
+           write.csv(group_markers,
+                        paste0(DEG_path, "DEGs_",
+                               cluster_idents[comp_clust[cluster] + 
+                              1 - as.integer(leiden_alg)], "_vs_",
+                              cluster_idents[base_clust[index] + 1  -
+                              as.integer(leiden_alg)],
+                               "_", DEG_test, "_min.", min_pct, "_res.",
+                               chose_resolution, suffix, ".csv"),
+                     row.names = TRUE)
+        } else {
+          write.csv(group_markers, 
+                    paste0(DEG_path, "DEGs_", write_name,
+                    cluster_idents[comp_clust[cluster] + 
+                    1 - as.integer(leiden_alg)], "_vs_",
+                    cluster_idents[base_clust[index] + 1  -
+                    as.integer(leiden_alg)], "_", DEG_test, "_min.", min_pct,
+                    "_res.", chose_resolution, suffix, ".csv"),
+                    row.names = TRUE)
+        }
+        plot_vol(group_markers, paste0(cluster_idents[comp_clust[cluster] + 1 -
+                                         as.integer(leiden_alg)], "_vs_",
+                                       cluster_idents[base_clust[index] + 1 -
+                                         as.integer(leiden_alg)]))
+      }
+    }
+  }
+}
+```
+
+## Calculate genes that differentiate each cluster from all other clusters.
+```{r Calc_Diff}
+# Find markers for every cluster compared to all remaining cells to support
+# cell identity verification.
+if (clust_to_all_clust) {
+  # Set the file paths to DEG folder:
+  DEG_path <- change_path(paste0(outpath, "/DEG/cluster_to_allclusters/"))
+  vln_path <- change_path(paste0(DEG_path, "vln_plots/"))
+  vol_path <- change_path(paste0(DEG_path, "vol_plots/"))
+  heat_path <- change_path(paste0(DEG_path, "heatmap_plots/"))
+
+  # Set cluster identities in Seurat object to the numbers from the resolution
+  # you chose previously
+  Idents(object = ss_data_norm) <- res_name
+  
+
+  print('Finding genes that differentiate each cluster from other cells.')
+  all_markers <- FindAllMarkers(ss_data_norm,
+                                test.use = DEG_test,
+                                only.pos = FALSE,
+                                min.pct = min_pct,
+                                logfc.threshold = 0,
+                                return.thresh = 1)
+  
+  # Write the top cluster genes to a csv file.
+  if (overwrite){
+    write.csv(all_markers, paste0(DEG_path,
+                                   "all_genes_per_cluster_compared_all_res.",
+                                   chose_resolution, suffix, ".csv")) 
+  } else {
+    write.csv(all_markers, paste0(DEG_path, write_name,
+                                   "all_genes_per_cluster_compared_all_res.",
+                                   chose_resolution, suffix, ".csv")) 
+  }
+  
+  # Subset DEG data into cluster gene lists
+  deg_clust <- all_markers %>% group_by(cluster) %>% group_split(.keep = TRUE)
+  for (list in deg_clust) {
+    plot_vol(list, list$cluster[[1]])
+  }
+}
+```

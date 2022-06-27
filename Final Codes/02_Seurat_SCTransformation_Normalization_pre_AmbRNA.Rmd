@@ -1,0 +1,255 @@
+---
+title: "Seurat_SCTransformation_Normalization"
+author: "Kevin Green and Katie Prater"
+date: "7/7/2020"
+output:
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+```
+
+# Jayadev Lab RNAseq Data Processing Pipeline
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Define your project folders, filenames, and variables of interest.
+# You MUST edit this for your dataset to run properly!!!!
+```{r 'Project_Information', echo=TRUE}
+# Previous data file name: (give the name for the appropriate .rdata file)
+start_data <- "original_data_20210331.rdata"
+
+# Set the cutoffs for UMI #, gene #, and mitochondrial gene percent
+umi_cutoff <- 400
+mito_cutoff <- 1.0
+gene_cutoff <- 400
+
+# Set sample type (i.e. nuclei, pbmcs, organoid or other)
+sample_type <- "nuclei"
+
+# Set the number of variable features you want
+nfeatures <- 2500
+
+# Do you want to downsample the data for testing purposes?
+# Enter TRUE or FALSE
+downsample <- FALSE
+# If downsampling, set the number of cells to use per sample
+downsample_number <- 500
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the thresholded Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+Sys.umask(mode = "000")
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+```
+
+```{r QC_Plots}
+# QC metric histograms colored by sample with threshold lines plotted
+plot7 <-  ggplot(ss_data@meta.data,
+                  aes(color=ss_data@meta.data$Pt_ID,
+                      x=nCount_RNA,
+                      fill= ss_data@meta.data$Pt_ID)) + 
+          geom_density(alpha = 0.2) + 
+          scale_x_log10() + 
+          theme_classic() +
+          xlab("Number of copies/gene") +
+          ylab("Frequency") +
+          geom_vline(xintercept = umi_cutoff)
+          geom_text(mapping = aes(x = 10,
+                                    y = 0,
+                                    label = umi_cutoff),
+                                    angle = 90,
+                                    colour = "black",
+                                    hjust = -1.5,
+                                    vjust = -.2)
+
+plot8 <-  ggplot(ss_data@meta.data,
+                 aes(color=ss_data@meta.data$Pt_ID,
+                     x=percent.mito,
+                     fill= ss_data@meta.data$Pt_ID)) +
+          geom_density(alpha = 0.2) +
+          scale_x_log10() +
+          theme_classic() +
+          xlab("% Mitochondrial Genes") +
+          ylab("Frequency") +
+          geom_vline(xintercept = mito_cutoff) +
+          #xlim(0, 15) +
+          geom_text(mapping = aes(x = 10,
+                                    y = 0,
+                                    label = mito_cutoff),
+                                    angle = 90,
+                                    colour = "black",
+                                    hjust = -1.5,
+                                    vjust = -.2)
+
+plot9 <-  ggplot(ss_data@meta.data,
+                  aes(color=ss_data@meta.data$Pt_ID,
+                      x=nFeature_RNA,
+                      fill= ss_data@meta.data$Pt_ID)) + 
+          geom_density(alpha = 0.2) + 
+          theme_classic() +
+          scale_x_log10() +
+          xlab("Number of genes/cell") +
+          ylab("Frequency") +
+          geom_vline(xintercept = gene_cutoff)+
+          geom_text(mapping = aes(x = 10,
+                                    y = 0,
+                                    label = gene_cutoff),
+                                    angle = 90,
+                                    colour = "black",
+                                    hjust = -1.5,
+                                    vjust = -.2)
+plot7
+plot8
+plot9
+
+plot10 <- plot7 + plot8 + plot9
+ 
+# Save the plots
+ggsave(filename = paste0(plotspath, "QC_feature_histograms_by_sample",
+                        suffix, ".png"),
+       height = 9, width = 18, plot = plot10)
+```
+
+### Threshold the data based on the above QC thresholds that you set.
+```{r Threshold_data}
+# Remove droplets that do not meet the given thresholds
+print("Removing droplets below threshold...")
+ss_data_filtered <- subset(x = ss_data,
+                           subset = nCount_RNA >= umi_cutoff &
+                             percent.mito < mito_cutoff &
+                             nFeature_RNA >= gene_cutoff)
+
+# Remove objects that are no longer necessary
+rm(ss_data, list = setdiff(ls(pattern = "^plot"), "plotspath"))
+
+```
+
+```{r data_metrics}
+# Ensure paths are set for code:
+metrics_path <- file.path(outpath, "data_metrics/", fsep = "/")
+if (file.exists(metrics_path)){
+  cat("data_metrics directory path works!")
+} else {
+  cat("data_metrics directory does not exist - creating", "\n")
+  dir.create(metrics_path)
+  cat("data_metrics directory created:", file.exists(metrics_path))
+}
+
+# Determine total number of genes and total number of cells and writes info into
+# a csv file
+totals <- dim(ss_data_filtered)
+names(totals) <- c("genes", "cells")
+print(totals)
+write.csv(totals,
+          paste0(metrics_path, "preQC_total_genes&cells", suffix, ".csv"))
+
+# Gets number of nuclei per sample
+num_cells <- table(ss_data_filtered$orig.ident) 
+
+# Gets average # of genes per cell
+avg_gene <- rbind(round(by(ss_data_filtered@meta.data$nFeature_RNA,
+                           ss_data_filtered@active.ident, mean)))
+# Gets average # of UMIs per cell
+avg_umi <- rbind(round(by(ss_data_filtered@meta.data$nCount_RNA,
+                          ss_data_filtered@active.ident, mean)))
+# Combines and prints above metrics
+metrics <- rbind(num_cells, avg_gene, avg_umi)
+row.names(metrics) <- c("Cells", "Avg genes per cell", "Avg UMIs per cell")
+print(metrics)
+write.csv(metrics,
+          paste0(metrics_path, "preQC_metrics", suffix, ".csv"))
+
+rm(totals, num_cells, avg_gene, avg_umi, metrics)
+```
+
+```{r Downsample}
+# Randomly selects the given number of cells/nuclei if downsampling
+# Save the seurat objects after thresholding if not downsampled
+# Prints whether the samples will be downsampled or not
+if (downsample) {
+  print("The samples will be limited to", downsample_number, "cells/nuclei")
+  ss_data_filtered <- subset(ss_data_filtered,
+                       ident = unique(ss_data_filtered@meta.data[["Pt_ID"]]),
+                       downsample = downsample_number)
+} else {
+  print("The samples were not downsampled. Saving the data...")
+  saveRDS(ss_data_filtered, 
+          file = paste0(rfiles_path, "seurat_ss_data_thresholded", 
+                        suffix, ".rds"))
+}
+```
+
+## Normalize using Seurat SCTransform
+```{r SCTransform, warning=FALSE}
+# Downsampling for testing purposes
+if(downsample) {
+  ss_data_filtered <- subset(ss_data_filtered,
+                       ident = unique(ss_data_filtered@meta.data[["orig.ident"]]),
+                       downsample = 300)
+}
+
+# Normalize read depth using SCTransformation
+ss_data_filtered <- Seurat::SCTransform(ss_data_filtered,
+                                        variable.features.n = nfeatures,
+                                        do.scale = FALSE,
+                                        do.center = FALSE,
+                                        conserve.memory = TRUE,
+                                        return.only.var.genes = FALSE,
+                                        vars.to.regress = "percent.mito",
+                                        verbose = TRUE)
+```
+
+```{r Save Data}
+# Remove files that are no longer needed
+rm(downsample, downsample_number, gene_cutoff, mito_cutoff, umi_cutoff)
+
+# Save workspace image if needed to revisit
+print("Saving the data...")
+save.image(file = paste0(rfiles_path, "preQC_normalized_ws", suffix, ".rdata"),
+           compress = TRUE)
+```

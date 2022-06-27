@@ -1,0 +1,120 @@
+---
+title: "33_specific_pathway_chart_v1"
+author: "Kevin Green and Katie Prater"
+date: "3/9/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(pheatmap)
+library(RColorBrewer)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Detection of Differential genes by pseudobulk analysis
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset with cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Set the path to the folder containing DEG csvs that are to be compared to
+# published DEGs. Must begin with the "output_yyyymmdd" folder
+# (e.g. "output_20201208/DEG/cluster_to_cluster/")
+csv_path <- "output_post-sub_no_ref/DEG/cluster_to_cluster/gsea/"
+  
+# Provide the pattern of csv naming using regex characters
+# If csv contains multiple clusters, do only one csv at a time
+csv_pattern <- "4_vs_1_KEGG_pathways"
+
+# Set the csv files containing the pathways you wish to plot.
+# Please put the csv in the data folder of the project
+ref <- c("4_vs_1_KEGGpathways_noref_full22.csv")
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("000")
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+```
+
+``` {r read_csvs}
+# Set the path to the csv to be analyzed
+csv_path <- paste0("../output/", csv_path)
+
+# Read in csvs
+csvs <- list.files(path = csv_path, pattern = csv_pattern)
+if (length(csvs) != length(ref)) {
+  stop("Length of csvs must match the length of ref")
+}
+
+# Set plots path
+plots_path <- change_path(paste0(csv_path, "plots/"))
+chart_path <- change_path(paste0(plots_path, "pathway_charts/"))
+```
+
+```{r create_charts}
+for (csv in 1:length(csvs)) {
+  # Read in pathways from the given csv
+  paths_of_int <- read.csv(paste0("../data/", ref[csv]),
+                           header = FALSE)
+  
+  # Remove unwanted pathways
+  gsea_results <- read.csv(paste0(csv_path, csvs[csv]))
+  gsea_results <- gsea_results[gsea_results$ID %in% paths_of_int[,1],]
+  
+  # Store file name
+  file_name <- strsplit(csvs[csv], ".csv")[[1]][1]
+
+  # Create bar chart of chosen pathways
+  gsea_results$Description <- sub(".*?_", "", gsea_results$Description)
+  gsea_results$Description <- substr(gsea_results$Description, 1, 30)
+  gsea_plot <- ggplot(gsea_results, aes(reorder(Description, NES), NES)) +
+                      geom_col(aes(fill = NES > 0)) +
+                      scale_fill_manual(values = c("#a6a6a6", "#5a5a5a")) +
+                      coord_flip() +
+                      theme_bw(base_size = 22, base_line_size = 0,
+                               base_rect_size = 0) +
+                      theme(legend.position = "none") +
+                      labs(x = "Pathway", y = "Normalized Enrichment Score",
+                           title = paste(file_name))
+  print(gsea_plot)
+  ggsave(filename = paste0(chart_path, file_name, ".svg"),
+         height = 14, width = 20, plot = gsea_plot)
+  ggsave(filename = paste0(chart_path, file_name, ".png"),
+         height = 14, width = 20, plot = gsea_plot)
+}
+```

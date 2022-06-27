@@ -1,0 +1,559 @@
+---
+title: "08_snRNAseq_anchoring_v6"
+author: "Katie Prater and Kevin Green"
+date: "6/24/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(dplyr)
+library(parallel)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+### Removal of unwanted batch/sample effects, normalization, and anchoring for
+### cleanup of data
+## (but no regression for population variables of no interest - those come
+## afterward on the whole dataset)
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that needs to be normalized.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Name of the Rdata file to load in:
+start_data <- "QCd_ws_no-ref_APOE33_cluster1subset.rdata"
+
+# Define the number of genes you want after variable gene detection:
+nfeatures <- 5000
+
+# Set reduction type ("cca" or "rpca")
+reduction <- "cca"
+
+# Subset samples (TRUE or FALSE)? (e.g. by batch or patient group)
+sample_sub <- FALSE
+
+# Give variable name to subset on:
+# If not subsetting, use ""
+var_subset <- ""
+
+# Use reference (TRUE or FALSE)?
+# Using a reference sample will decrease the run time 
+use_reference <- FALSE
+
+# Set a list of reference samples to use for integration
+# e.g. c("s1441", "s6672"). Set to NULL if no reference sample is used
+# One or multiple samples may be used; the example by Seurat used male and
+# female samples
+reference_samples <- NULL #c("s7017_PU_1", "s7064_PU_1")
+
+# List the sample-level variables from the meta.data that should be 
+# regressed out. These are variables that have a different value for each 
+# nucleus only (e.g. percent.mito). No population/group-level variables here.
+unwanted <- c("percent.mito") #, "orig.ident")
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- "../output/output_post-sub_no_ref/APOE33_subset/cluster1_subset/"
+
+# Change the suffix, if necessary
+change_suffix <- "_no_ref_APOE33_clust1subset"
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+if (!is.null(change_suffix)) {
+  suffix <- change_suffix
+}
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+Sys.umask("007")
+
+# Create change paths function
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+if (!is.null(change_output_path)) {
+  outpath <- change_path(change_output_path)
+}
+
+# Create UMAPs folder
+umaps_path <- change_path(paste0(outpath, "umaps/"))
+
+# Create data_metrics folder
+metrics_path <- change_path(paste0(outpath, "data_metrics/"))
+
+if (exists("ss_data_norm")) {
+  # Change the active assay to the assay to be evaluated for DEG
+  DefaultAssay(ss_data_norm) <- "RNA"
+  ss_data_scrubbed <- ss_data_norm
+  rm(ss_data_norm)
+}
+```
+
+```{r Set_Directories}
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+```
+
+```{r data_metrics}
+# Determine total number of genes and total number of cells and writes info into
+# a csv file
+totals <- dim(ss_data_scrubbed)
+names(totals) <- c("genes", "cells")
+print(totals)
+write.csv(totals,
+          paste0(metrics_path, "postQC_total_genes&cells", suffix, ".csv"))
+
+# Gets number of nuclei per sample
+num_cells <- table(ss_data_scrubbed$orig.ident) 
+
+# Gets average # of genes per cell
+avg_gene <- rbind(round(by(ss_data_scrubbed@meta.data$nFeature_RNA,
+                           ss_data_scrubbed@active.ident, mean)))
+# Gets average # of UMIs per cell
+avg_umi <- rbind(round(by(ss_data_scrubbed@meta.data$nCount_RNA,
+                          ss_data_scrubbed@active.ident, mean)))
+# Combines and prints above metrics
+metrics <- rbind(num_cells, avg_gene, avg_umi)
+row.names(metrics) <- c("Cells", "Avg genes per cell", "Avg UMIs per cell")
+print(metrics)
+write.csv(metrics,
+          paste0(metrics_path, "postQC_metrics", suffix, ".csv"))
+
+rm(totals, num_cells, avg_gene, avg_umi, metrics)
+```
+
+## Make umap plots for each sample prior to normalization/anchoring to have a
+## comparison for afterward.
+```{r Before_UMAPS}
+if (!file.exists(paste0(outpath, "/umaps/preSCT/umaps_all_samples_preSCT",
+                        suffix, ".png"))) {
+  # Run PCA and UMAP on data
+  ss_data_pca <- FindVariableFeatures(ss_data_scrubbed, nfeatures = 5000)
+  ss_data_pca <- ScaleData(ss_data_pca)
+  ss_data_pca <- RunPCA(object = ss_data_pca, verbose = FALSE)
+  ss_data_pca <- RunUMAP(object = ss_data_pca, dims = 1:30)
+  
+  # Create UMAPs folder
+  umaps_path <- file.path(outpath, "umaps/preSCT/", fsep = "/")
+  if (file.exists(umaps_path)) {
+    cat("Output directory path works!")
+  } else {
+    cat("Output directory does not exist - creating")
+    dir.create(umaps_path)
+  }
+  
+  # Make a standard UMAP plot of the clusters by sample before SCTransform
+  # Get dataset to use ggplot instead of Seurat functions.
+  class_umap_data <- FetchData(ss_data_pca,
+                               vars = c("ident", "UMAP_1", "UMAP_2"))
+  list_idents <- unique(class_umap_data$ident)
+  
+  # Make UMAP overlay of each sample on top of the overall dataset
+  for (sample in 1:length(list_idents)) {
+    subset_sample_data <- class_umap_data %>% filter(ident == list_idents[sample])
+    plotname <- paste0("plot_", sample)
+    assign(plotname, ggplot(data = class_umap_data, aes(x = UMAP_1, y = UMAP_2)) + 
+      geom_point(alpha = 0.25, size = 0.01, colour = "grey") + 
+      geom_point(data = subset_sample_data, alpha = 0.25, size = 0.01,
+                 colour = "blue") + 
+      theme_bw() + 
+      theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+    )
+    ggsave(filename = paste0(umaps_path, "umaps_preSCT_sample_", sample,  suffix,
+                             ".png"),
+         height = 12, width = 12, plot = get(plotname))
+  }
+  
+  # Combine plots into one image object and save it
+  plot_name <- rep(NA, length(list_idents))
+  for (plots in 1:length(list_idents)) {
+    plot_name[plots] <- paste0("plot_", plots)
+  }
+  plots <- paste(plot_name[1:length(list_idents)], collapse = " + ")
+  all_plots <- eval(str2expression(plots))
+  ggsave(filename = paste0(umaps_path, "umaps_all_samples_preSCT", suffix, ".png"),
+         height = 12, width = 12, plot = all_plots)
+  
+  # Clean up variables and objects
+  objs <- ls()
+  objects_to_remove <- c(grep('plot_', objs, value = TRUE))
+  rm(list = objects_to_remove)
+  rm(ss_data_pca, class_umap_data, list_idents, subset_sample_data, sample,
+     plotname, plot_name, plots, all_plots)
+}
+```
+
+## We split the Seurat object into individual samples to find the variable
+## genes in each sample, generate a weighted list of those genes for all
+## samples, and then determine integration anchors based on a reference defined
+## above.
+```{r Var_genes_&_anchors, warning=FALSE}
+# Create normalization function
+normalize <- function (data) {
+  data <- SCTransform(data, 
+                      variable.features.n = nfeatures,
+                      do.scale = FALSE,
+                      do.center = FALSE,
+                      conserve.memory = TRUE,
+                      return.only.var.genes = FALSE,
+                      vars.to.regress = unwanted,
+                      verbose = FALSE)
+}
+
+# Subset the samples if needed and run integration on the subsets, else run
+# without subsetting.
+if(sample_sub) { # If true, subset the samples.
+  
+  print(paste("Subsetting dataset with", var_subset, sep = " "))
+  
+  ss_data_scrubbed <- SplitObject(ss_data_scrubbed, split.by = var_subset)
+  
+  print(paste("Split Seurat object now has",
+              length(unique(names(ss_data_scrubbed))), "groups.", sep = " "))
+
+  # Run normalization for each subset of the data.
+  print(paste("Running SCT on Seurat object and regressing out",
+              unwanted, "variable.", sep = " "))
+  ss_data_norm <- lapply(ss_data_scrubbed, normalize)
+  
+  rm(ss_data_scrubbed)
+  
+  # Save rds of the anchorset 
+  saveRDS(ss_data_norm,
+          file = paste0(rfiles_path, "QCd_data_subset_", var_subset,
+                        "_normed_wscale", suffix, ".rds"))
+  
+  # Find the integration features similar across all samples for the top
+  # nFeatures of genes.
+  Ifeatures <- SelectIntegrationFeatures(ss_data_norm, nfeatures = nfeatures)
+  
+  # Ensure we're using the normalized data to integrate.
+  ss_data_norm <- PrepSCTIntegration(ss_data_norm, anchor.features = Ifeatures)
+  
+  # *** This code needs editing ***
+  # if(use_reference) { # If use_reference = True, run this for subgroup_2
+  #   
+  #   # Find integration anchors for individual samples to correct for sample
+  #   # batch effects using the Integration features identified above and
+  #   # references. 
+  #   # *Note that this step takes many hours (7 for 15 samples)
+  #   print(paste("Finding integration anchors using",
+  #               names(ss_data_norm2[reference_samples2]),
+  #               "as reference samples."))
+  #   
+  #   # Create index reference for the reference samples
+  #   if (use_reference) {
+  #     reference_samples2 <- rep(NA, length(reference_samples))
+  #     
+  #     for (sample in 1:length(reference_samples)) {
+  #       reference_samples2[[sample]] <- which(names(ss_data_norm) ==
+  #                                               reference_samples[[sample]])
+  #     }
+  #   }
+  #   
+  #   ss_data_norm2 <- FindIntegrationAnchors(ss_data_norm2,
+  #                                           reference = reference_samples2,
+  #                                           normalization.method = "SCT",
+  #                                           anchor.features = Ifeatures,
+  #                                           reduction = "cca",
+  #                                           dims = 1:30)
+  # } else { # If use_reference is not true, run this
+
+    # Find integration anchors for individual samples to correct for sample
+    # batch effects using the Integration features identified above using no
+    # references.
+    # *Note that this step takes many hours (7 for 15 samples)
+    print("Finding integration anchors using no reference samples.")
+    ss_data_norm <- FindIntegrationAnchors(ss_data_norm,
+                                           normalization.method = "SCT",
+                                           reference = NULL,
+                                           anchor.features = Ifeatures,
+                                           reduction = "cca",
+                                           dims = 1:30)
+  # }
+  
+  # Save rds of the anchorset 
+  saveRDS(ss_data_norm,
+          file = paste0(rfiles_path, "QCd_data_subset_", var_subset,
+                        "_anchored", suffix, ".rds"))
+  
+  # Integrate the datasets from each sample together.
+  ss_data_norm <- IntegrateData(ss_data_norm,
+                                normalization.method = "SCT",
+                                dims = 1:30)
+
+} else { # If the data is not to be subsetted, run this:
+ 
+  # Split the combined Seurat object into individual samples to be integrated
+  ss_data_scrubbed <- SplitObject(ss_data_scrubbed,
+                              split.by = "orig.ident")
+  print(paste("Split Seurat object now has",
+              length(unique(names(ss_data_scrubbed))), "individual samples."))
+  
+  # Run normalization for the data
+  print(paste("Running SCT on Seurat object and regressing out",
+              unwanted, "variable.", sep = " "))
+  ss_data_norm <-  lapply(ss_data_scrubbed, normalize)
+  # Removing the parallel processing to allow consistency
+  # ss_data_norm <-  mclapply(ss_data_scrubbed, normalize, mc.cores = cores)
+  rm(ss_data_scrubbed)
+
+  # Create index reference for the reference samples
+  if (use_reference) {
+    reference_samples2 <- rep(NA, length(reference_samples))
+    
+    for (sample in 1:length(reference_samples)) {
+      reference_samples2[[sample]] <- which(names(ss_data_norm) ==
+                                              reference_samples[[sample]])
+    }
+  }
+    
+  # Find the integration features similar across all samples for the top
+  # nfeatures of genes.
+  Ifeatures <- SelectIntegrationFeatures(ss_data_norm, nfeatures = nfeatures)
+  
+  # Ensure we're using the normalized data to integrate.
+  ss_data_norm <- PrepSCTIntegration(ss_data_norm, anchor.features = Ifeatures)
+  
+  # Determine PCAs if running reciprocal PCA
+  if (identical(reduction, "rpca")) {
+    ss_data_norm <- lapply(ss_data_norm, FUN = function(x) {
+      x <- RunPCA(x, features = Ifeatures)
+    })
+  }
+  
+  # Find integration anchors for individual samples to correct for sample batch
+  # effects using the Integration features identified above. 
+  # *Note that this step takes many hours (7 for 15 samples)
+  print(paste("Finding integration anchors using",
+              names(ss_data_norm[reference_samples]),
+              "as reference samples.", sep = " "))
+  
+  if (!use_reference) {
+    reference_samples2 <- NULL
+  }
+  ss_data_norm <- FindIntegrationAnchors(ss_data_norm,
+                                         reference = reference_samples2,
+                                         anchor.features = Ifeatures,
+                                         reduction = reduction,
+                                         dims = 1:30)
+  
+  # Save rds of the anchorset 
+  saveRDS(ss_data_norm,
+          file = paste0(rfiles_path, "anchorset_data", suffix, ".rds"))
+  
+  # Integrate the datasets from each sample together.
+  ss_data_norm <- IntegrateData(ss_data_norm, 
+                                normalization.method = "SCT",
+                                dims = 1:30)
+}
+```
+
+## Make a couple of quick umap plots to confirm that the batch correction worked well.
+```{r UMAP_plot}
+# Set default assay
+DefaultAssay(ss_data_norm) <- "integrated"
+
+if (all(is.na(ss_data_norm@assays$integrated@scale.data))) {
+  warning("scale.data slot was empty. Transferred from data slot")
+  ss_data_norm <- SetAssayData(ss_data_norm, 
+                               "scale.data",
+                               as.matrix(ss_data_norm@assays$integrated@data))
+}
+
+# Create UMAPs folder
+umaps_path <- file.path(outpath, "umaps/postSCT/", fsep = "/")
+if (file.exists(umaps_path)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(umaps_path)
+}
+
+# Run PCA and UMAP to get the data
+ss_data_norm <- RunPCA(ss_data_norm, 
+                       features = VariableFeatures(ss_data_norm), 
+                       npcs = 50)
+
+# Determine the number of PCs required to obtain a change in standard deviation
+# less than 0.1, for which 90% of the variance is accounted, and 95% of the 
+# variance.
+variances <- Stdev(ss_data_norm@reductions$"pca")^2
+variance <- sum(variances)
+variances <- variances/variance
+
+print(paste("The variance accounted for by all prinicple components is:",
+            variance, sep = " "))
+print(paste("The number of prinicple components needed to account for greater", 
+            "than 90% of the variance is:", min(which(cumsum(variances) > .90))))
+print(paste("The number of prinicple components needed to account for greater", 
+            "than 95% of the variance is:", min(which(cumsum(variances) > .95))))
+PCs <- min(which(abs(diff(variances)) < .001))
+print(paste("The recommended number of prinicple components is:", PCs))
+
+# Generate an elbow plot for the PCA   
+plot1 <- ElbowPlot(ss_data_norm, ndims = 50)
+print(plot1)
+ggsave(paste0(umaps_path, "PC_elbow_plot_Post-QC_anchored", suffix, ".png"))
+
+# Visualize the PCs as top 10 genes
+print(ss_data_norm[["pca"]], dims = 1:5, nfeatures = 10)
+
+# Visualize the top 10 PCs with their genes
+plot1 <- VizDimLoadings(ss_data_norm, dims = 1:10, reduction = "pca")
+print(plot1)
+ggsave(paste0(umaps_path, "PC_loadings_plot_Post-QC_anchored", suffix, ".svg"))
+
+ss_data_norm <- RunUMAP(object = ss_data_norm, dims = 1:30)
+
+if (sample_sub) {
+# Make a standard UMAP plot of the clusters
+  plot1 <- DimPlot(object = ss_data_norm,
+                       reduction = "umap",
+                       group.by = var_subset,
+                       split.by = var_subset,
+                       pt.size = 1,
+                       label = FALSE,
+                       label.size = 10)
+  print(plot1)
+  ggsave(filename = paste0(umaps_path, "integrated_clusters_wscale_postQC",
+                           var_subset, suffix, ".png"),
+         height = 10, width = 8, plot = plot1)
+}
+
+# Next, switch the identity class of all cells to reflect sample ID
+Idents(ss_data_norm) <- "orig.ident"
+
+# Make a standard UMAP plot of the clusters
+plot2 <- DimPlot(object = ss_data_norm,
+                     reduction = "umap",
+                     pt.size = 1,
+                     label = FALSE,
+                     label.size = 10)
+plot2[[1]]$layers[[1]]$aes_params$alpha = .2
+print(plot2)
+ggsave(filename = paste0(umaps_path, "integrated_samples_postQC",
+                         var_subset, suffix, ".png"),
+       height = 8, width = 8, plot = plot2)
+    
+# Make a standard UMAP plot of the clusters by sample
+plot3 <- DimPlot(object = ss_data_norm,
+                     reduction = "umap",
+                     split.by = "orig.ident",
+                     pt.size = 1,
+                     label = FALSE,
+                     label.size = 10,
+                     ncol = 5)
+print(plot3)
+ggsave(filename = paste0(umaps_path, "integrated_samples_split_postQC_",
+                         var_subset, suffix, ".png"),
+       height = 12, width = 12, plot = plot3)
+
+# Make a standard UMAP plot of the clusters by sample after SCTransform
+# Get dataset to use ggplot instead of Seurat functions.
+class_umap_data <- FetchData(ss_data_norm,
+                             vars = c("ident", "UMAP_1", "UMAP_2"))
+list_idents <- unique(class_umap_data$ident)
+
+# Make UMAP overlay of each sample on top of the overall dataset
+for (sample in 1:length(list_idents)) {
+  subset_sample_data <- class_umap_data %>% filter(ident == list_idents[sample])
+  plotname <- paste0("plot_", sample)
+  assign(plotname, ggplot(data = class_umap_data, aes(x = UMAP_1, y = UMAP_2)) + 
+    geom_point(alpha = 0.25, size = 0.01, colour = "grey") + 
+    geom_point(data = subset_sample_data, alpha = 0.25, size = 0.01,
+               colour = "blue") + 
+    theme_bw() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line = element_line(colour = "black"))
+  )
+  ggsave(filename = paste0(umaps_path, "umaps_postSCT_sample_", sample, "_",
+                           var_subset, suffix,
+                           ".png"),
+       height = 12, width = 12, plot = get(plotname))
+}
+
+# Combine plots into one image object and save it
+plot_name <- rep(NA, length(list_idents))
+for (plots in 1:length(list_idents)) {
+  plot_name[plots] <- paste0("plot_", plots)
+}
+plots <- paste(plot_name[1:length(list_idents)], collapse = " + ")
+all_plots <- eval(str2expression(plots))
+ggsave(filename = paste0(umaps_path, "umaps_all_samples_postSCT", "_",
+                         var_subset, suffix, ".png"),
+       height = 12, width = 12, plot = all_plots)
+
+# Clean up variables and objects
+objs <- ls()
+objects_to_remove <- c(grep('plot_', objs, value = TRUE))
+rm(list = objects_to_remove)
+rm(ss_data_pca, class_umap_data, list_idents, subset_sample_data, sample,
+   plotname, plot_name, plots, all_plots)
+
+# Save umaps_path variable as path to generic umaps folder for future use.
+umaps_path <- file.path(outpath, "umaps/", fsep = "/")
+```
+
+## Save the data files.
+```{r Save_Files}
+# Remove objects that are no longer needed
+rm(sample_sub, use_reference, reference_samples, reference_samples2, params,
+   nfeatures, plot1, plot2, plot3, unwanted, variance, variances, start_data,
+   change_suffix, change_output_path)
+
+# Save workspace image if needed to revisit
+save.image(file = paste0(rfiles_path, "QCd_norm_anchored_", reduction, "_",
+                         var_subset, "_ws", suffix, ".rdata"), compress = TRUE)
+```

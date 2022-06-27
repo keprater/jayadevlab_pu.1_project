@@ -1,0 +1,315 @@
+---
+title: "11.5_snRNAseq_cluster_stats_optional_subset_clusters_v4"
+author: "Katie Prater and Kevin Green"
+date: "03/01/2021"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(tidyverse)
+library(harmony)
+library(SeuratWrappers)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Output of numbers of nuclei for each cluster. Optional subsetting of dataset
+## for further analysis after output of stats.
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that needs to be subset.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_louvain_multi_clustered_ws_20pcs_MNN_20210331.rdata" 
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.4"
+
+# Set the sample ID meta-data variable name
+ID <- "Pt_ID"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Analyze clusters by specific grouping (i.e. a metadata variable)? - Boolean
+clust_group <- FALSE
+
+# If clust_group is TRUE, variables in your metadata to group the cluster
+# numbers by (must match variable names in metadata). Otherwise, NULL.
+meta_vars <- NULL #c("Study_Designation", "APOE", "Sex", "SeqBatch", "NP_Dx",
+               #"CognitiveStatus", "NIA_AA")
+
+# -------------------------------------------------------------------------
+# Subset dataset by cluster(s) for further analysis of just those nuclei? - Boolean
+sample_sub <- TRUE
+
+# If sample_sub = TRUE: Name for your subset dataset"
+change_suffix <- "_mg_only_mnn_20210331"
+
+# If sample_sub = TRUE: are you using clusters or metadata as your subset
+# variable? Input "clusters" or "metadata" here.
+subset_type <- "clusters"
+
+#-------------------------------------------------------------------------
+#If you are subsetting by METADATA:
+  # If sample_sub = TRUE and you are subsetting by a metadata variable/group -  
+  # provide the variable name as seen in your Seurat object metadata.
+  sub_meta_var <- NULL
+
+  # If sample_sub = TRUE: Give specific group name(s) to subset on 
+  # If False, give NULL.
+  meta_subset_names <- NULL
+  
+# ------------------------------------------------------------------------
+# If you are subsetting by CLUSTERS:
+  # If sample_sub = TRUE: Give cluster or specific group name(s) to subset on 
+  # (clusters should match names in script 11 labeling). If False, give NULL.
+  clust_subset_names <- c("0", "1", "2", "4", "5", "8", "10", "11", "14")
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+#Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+Sys.umask("000")
+
+if (!is.null(change_output_path)) {
+  outpath <- change_output_path
+}
+
+if (!is.null(change_suffix)) {
+  print(paste0("Changing dataset name to:", change_suffix))
+  suffix <- change_suffix
+}
+
+#Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+metrics_path <- file.path(outpath, "data_metrics/", fsep = "")
+if (file.exists(metrics_path)) {
+  cat("Data metrics directory path works!")
+} else {
+  cat("Data metrics directory does not exist - creating")
+  dir.create(metrics_path)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+
+```
+
+## Collect and output data tables for the number of cells in each cluster,
+## collected by different metadata variables.
+
+```{r Dataset_Cluster_Stats}
+#make resolution name:
+res_name<- paste0(assay, "_snn_res.", chose_resolution)
+
+#Set cluster identities in Seurat object
+Idents(object = ss_data_norm)<-res_name
+
+# Generate a table with the number of nuclei in each sample
+sample_table <- table(ss_data_norm[[ID]])
+print(paste("The number of nuclei in each sample is:"))
+sample_table
+ 
+# Generate a table with the # nuclei per cluster
+overall <- table(Idents(ss_data_norm))
+print(paste("The number of nuclei in each cluster is:"))
+overall
+
+# Generate a table with the proportion of nuclei in each cluster
+prop_overall <- prop.table(table(Idents(ss_data_norm)))
+print(paste("The proportion of nuclei in each cluster is:"))
+prop_overall
+
+# Generate a table with the number of nuclei in each cluster split by sample
+clust_sample_table <- table(Idents(ss_data_norm), t(ss_data_norm[[ID]])) 
+print(paste0("The number of nuclei in each cluster split by sample is:"))
+clust_sample_table
+
+# Generate a table with the number of nuclei in each cluster split by subset
+# variable
+if (!is.null(meta_vars)) {
+  subset_table <- table(Idents(ss_data_norm))
+  for (group in 1:length(meta_vars)) {
+    ss_obj_index<-match(meta_vars[group], names(ss_data_norm@meta.data))
+    subset_table <- cbind(subset_table, table(Idents(ss_data_norm), 
+                     t(ss_data_norm@meta.data[ss_obj_index])))
+  }
+  print(paste0("The number of nuclei in each cluster split by your metadata
+               variables: ", meta_vars))
+  subset_table
+} else {
+  subset_table <- NULL
+}
+```
+## Write these tables to a CSV file.
+```{r Write_CSV}
+# Write a CSV with all the tables output above to a file in the data metrics folder.
+
+# Write the sample table because it has different dimensions
+write_csv(as.data.frame(sample_table),
+          paste0(metrics_path, "post-clustering_total_cells_", nPCs, "pcs_res.",
+                 chose_resolution, suffix, ".csv"))
+
+# Combine the other tables and write them out.
+total_tables <- as.data.frame(cbind(overall, prop_overall, clust_sample_table,
+                                    subset_table))
+csv_name <- paste0(metrics_path,'Post-Clustering_Dataset_Metrics_', nPCs,
+                   "pcs_res.", chose_resolution, suffix,'.csv')
+write_csv(total_tables, csv_name)
+```
+
+## Save any metadata variables prior to subsetting the dataset
+```{r save_cluster_metadata}
+# if (save_clusters){
+#   cnam <- colnames(ss_data_norm@meta.data)
+#   snns <- cnam[startsWith(cnam, "integrated_snn")]
+#   for (res in 1:length(snns)) {
+#     new_cname <- paste0(clusters_prefix, snns[res])
+#     ss_data_norm <- AddMetaData(ss_data_norm, ss_data_norm[[snns[res]]],
+#                                 col.name = new_cname)
+#   }
+# }
+
+```
+
+## If the dataset is to be subset for further analysis, that happens here:
+```{r Subset_Data}
+#Check if subset needs to happen:
+if (sample_sub) {
+  if (identical(subset_type, "clusters")) {
+    #Subset the data with the clusters identified into a new Seurat object.
+    print("Subsetting clusters:")
+    clust_subset_names
+    ss_data_norm <- subset(ss_data_norm, idents = clust_subset_names)
+    print("The new dimensions of the subset dataset are:") 
+    dim(ss_data_norm)
+  } else {
+    #Subset the data with the variable identified into a new Seurat object.
+    print(paste0("Subsetting the dataset with ", subset_type))
+    print("Subsetting:")
+    meta_subset_names
+    Idents(ss_data_norm) <- sub_meta_var
+    ss_data_norm <- subset(ss_data_norm, idents = meta_subset_names)
+    print("The new dimensions of the subset dataset are:") 
+    dim(ss_data_norm)
+  }
+  
+  if (!is.null(ss_data_norm@reductions$mnn)) {
+    red <- "mnn"
+  } else if (!is.null(ss_data_norm@reductions$harmony)){
+    red <- "harmony"
+  } else {
+    red <- "pca"
+  }
+  
+  # Run reduction analysis
+  if (red != "mnn") {
+    ss_data_norm <- RunPCA(object = ss_data_norm, verbose = FALSE, npcs = 50)
+  }
+  if (red == "harmony") {
+    ss_data_norm <- RunHarmony(ss_data_norm, group.by.vars = "orig.ident",
+                               assay.use = "SCT")
+  }
+  
+  # Determine the number of PCs required to obtain a change in standard deviation
+  # less than 0.1, for which 90% of the variance is accounted, and 95% of the 
+  # variance.
+  variances <- Stdev(ss_data_norm@reductions[[red]])^2
+  variance <- sum(variances)
+  variances <- variances/variance
+  
+  print(paste("The variance accounted for by all prinicple components is:",
+              variance, sep = " "))
+  print(paste("The number of prinicple components needed to account for greater", 
+              "than 90% of the variance is:", min(which(cumsum(variances) > .90))))
+  print(paste("The number of prinicple components needed to account for greater", 
+              "than 95% of the variance is:", min(which(cumsum(variances) > .95))))
+  PCs <- min(which(abs(diff(variances)) < .001))
+  print(paste("The recommended number of prinicple components is:", PCs))
+  
+  # Generate an elbow plot for the mnn   
+  plot1 <- ElbowPlot(ss_data_norm, ndims = 50, reduction = red)
+  print(plot1)
+  ggsave(paste0(umaps_path, "PC_elbow_plot_Post-subset", suffix, ".png"))
+} else {
+  print("The dataset will not be subset.")
+}
+
+```
+
+## Save the subset data files.
+```{r Save_Subset}
+#Check if subset needs to happen:
+if (sample_sub) {
+  #Remove extra data
+  rm(overall, prop_overall, subset_table, sample_table, nPCs,
+     csv_name, start_data, sample_sub, clust_subset_names, clust_sample_table,
+     meta_subset_names, clust_group, start_data, meta_vars, chose_resolution,
+     change_resolution,  change_suffix, group, ss_obj_index, sub_meta_var,
+     total_tables, subset_type, change_output_path, save_clusters,
+     clusters_prefix, cnam, snns)
+
+  #Save workspace image for the subset dataset:
+  print(paste0("Saving subset dataset in: ", rfiles_path,
+               "QCd_norm_anchored_ws", suffix, ".rdata"))
+  save.image(file = paste0(rfiles_path, "QCd_norm_anchored_ws",
+                           suffix, ".rdata"), compress = TRUE)
+} else {
+  print(paste0("The data is saved in: ", start_data))
+}
+```

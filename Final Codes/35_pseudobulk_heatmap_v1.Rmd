@@ -1,0 +1,190 @@
+---
+title: "35_pseudobulk_heatmap_v1"
+author: "Katie Prater and Kevin Green"
+date: "8/14/2020"
+output: 
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(pheatmap)
+library(png)
+library(RColorBrewer)
+```
+
+# Jayadev Lab snRNAseq Pipeline
+
+## Generate heatmap from pseudobulk data
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset from pseudobulk analysis.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "pseudobulk_ws_post-sub_no_ref.rdata"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- NULL
+
+# Set cluster name(s) that need to be analyzed
+clusters <- c(1:10)
+
+# Set which linear model will be plotted
+effect <- "Study_DesignationAD"
+
+# Set the metadata variable to color the points by
+meta_var <- "Study_Designation"
+
+# Set the genelists that should be used to make heatmaps. These should be in
+# csvs, saved in the data folder
+genelists <- c("comb_22_samp_pseudo_ref.csv")
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+## Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Change permissions to open for files created
+Sys.umask("007")
+
+# Change output path if a new one is provided.
+if (!is.null(change_output_path)) {
+  print("Changing output path")
+  outpath <- change_output_path
+}
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+```
+
+```{r Set_Directories}
+# Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+change_path <- function (path) {
+  # Confirm sample directory exists.
+  if (file.exists(path)) {
+    cat(path, " directory path works!\n")
+  } else {
+    cat(path, " directory does not exist - creating\n")
+    dir.create(path)
+  }
+  return(path)
+}
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(DEG_path)))
+```
+
+```{r create_functions}
+colors <- colorRampPalette(c("blue", "white", "red"))
+
+plot_heatmap <- function(features, name) {
+  geneset_fitted <- fitted[, colnames(fitted) %in% c("cluster", features)]
+  test <- geneset_fitted %>% group_by(cluster) %>% colSums()
+  plot2 <- pheatmap(geneset_fitted, 
+                    scale = "row",
+                    color = colors(200),
+                    annotation_names_col = FALSE,
+                    cluster_cols = F, cluster_rows = F)
+  if (overwrite){
+       ggsave(filename = paste0(DEG_path, name, "_pseudo_heatmap_res.",
+                                chose_resolution, suffix, ".pdf"),
+              width = 7, height = length(features)/8, plot = plot2,
+              limitsize = FALSE)
+  } else {
+       ggsave(filename = paste0(DEG_path, write_name, "_", name,
+                                "_pseudo_heatmap_res.", chose_resolution, suffix,
+                                ".pdf"),
+              width = 7, height = length(features)/8, plot = plot2,
+              limitsize = FALSE)
+  }
+}
+```
+
+## Calculate genes that differentiate each cluster from all other clusters.
+```{r Calc_Diff}
+# Set the file paths to DEG folder:
+DEG_path <- change_path(paste0(DEG_path, "heatmap_plots/"))
+
+# Create geneset names from genelists
+geneset_names <- substr(genelists, 1, nchar(genelists)-4)
+
+# Compile fitted expression data
+fitted <- NULL
+for (cluster in 1:length(clusters)) {
+  # Get fitted values of the cluster
+  cluster_fit <- get(paste0("fitted_", clusters[cluster], "_", effect))
+  
+  # Subset the metadata
+  cluster_metadata <- metadata[which(metadata$cluster_id == clusters[cluster]),]
+  
+  # Add metadata to fitted values
+  cluster_fit <- rbind(t(cluster_metadata$cluster_id), cluster_fit)
+  
+  # Combine all clusters
+  fitted <- cbind(fitted, cluster_fit)
+}
+rownames(fitted)[1] <- "cluster"
+fitted <- t(fitted)
+fitted <- as.data.frame(fitted)
+if(!is.na(try(as.numeric(fitted$cluster[1])))) {
+  fitted <- fitted[order(as.numeric(fitted$cluster)),]
+}
+fitted$cluster <- factor(fitted$cluster, levels = clusters)
+
+for (list in 1:length(genelists)) {
+  genelist <- toupper(unlist(read.csv(paste0(datapath, genelists[[list]]))))
+  plot_heatmap(genelist, geneset_names[[list]])
+}
+```

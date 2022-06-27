@@ -1,0 +1,297 @@
+---
+title: "10_snRNAseq_cluster_identity_detection_v3_subsetSCT"
+author: "Katie Prater and Kevin Green"
+date: "6/24/2020"
+output:
+  html_document:
+    df_print: paged
+params:
+  container: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(stringr)
+```
+# Jayadev Lab snRNAseq Pipeline
+
+## Removal of unwanted effects for cleanup of data and clustering
+
+### R Markdown note:
+This is an R Markdown document. When you click the **Knit** button a document
+will be generated that includes both content as well as the output of any
+embedded R code chunks within the document.
+
+## Set the dataset that needs cluster identities.
+# You MUST edit this for your dataset to run properly!!!!
+```{r Setup}
+# Previous data file name: (give the name for the appopriate RDS/Rdata file)
+start_data <- "QCd_leiden_clustered_ws_APOE33.rdata"
+
+# Tissue type: (brain, blood) - organoid is considered brain-related
+tissue_type <- "brain"
+
+# Cell Type (organoid, unsorted, pu1, pbmcs):
+cell_subtype <- "pu1"
+
+# # number of PCs
+# nPCs <- 15
+
+# Did you use Leiden as your clustering algorithm? (boolean):
+leiden_alg <- TRUE
+
+# Resolution chosen from previous clustering to use to label clusters:
+change_resolution <- "0.3"
+
+# Change output path if necessary, otherwise leave NULL
+change_output_path <- "../output/output_IndvRefSCT_20210331/"
+
+# Change suffix if needed, otherwise leave NULL
+change_suffix <- NULL
+
+#__________________**DO NOT EDIT BELOW THIS LINE**___________________________
+```
+
+### Load in the data you specified:
+```{r Load_Data}
+# Document your code:
+print(paste("This is when this code was started:", Sys.time()))
+
+# Print which container is being used
+if (identical(params$container, "")) {
+  stop("The container number must be documented before rendering.
+       params= list(container = ###)")
+}
+print(paste("Container number", params$container, "was used"))
+
+# Load the normalized/batch corrected Seurat object saved before
+print(paste('Loading data', start_data, sep = " "))
+load(paste0("../data/r_files/", start_data))
+
+# Print container package versions, if changed from previous
+if (!identical(params$container, prev_container)) {
+  print("This code was run using:")
+  print(sessionInfo())
+  prev_container <- params$container
+}
+rm(params)
+
+# Ensure cell type variable is set properly
+if (!identical(cell_subtype, cell_type)) {
+  cell_type <- cell_subtype
+}
+
+if (!is.null(change_output_path)) {
+  outpath <- change_output_path
+  # Change output UMAPs folder
+  umaps_path <- change_path(paste0(outpath, "/umaps/"))
+  if (leiden_alg) {
+    umaps_path <- change_path(paste0(umaps_path, "leiden_clust/"))
+  } else {
+    umaps_path <- change_path(paste0(umaps_path, "louvain_multi_clust/"))
+  }
+  umaps_path <- change_path(paste0(umaps_path, nPCs, "pcs/"))
+}
+
+#Ensure resolution to be used is set properly.
+if (!is.null(change_resolution)) {
+  chose_resolution <- change_resolution
+}
+
+#Ensure suffix to be used is set properly.
+if (!is.null(change_suffix)) {
+  suffix <- change_suffix
+}
+```
+
+```{r Set_Directories}
+#Ensure paths are set for code:
+if (file.exists(outpath)) {
+  cat("Output directory path works!")
+} else {
+  cat("Output directory does not exist - creating")
+  dir.create(outpath)
+}
+
+# Number of participants/samples to process:
+numsubs <- length(samples)
+print(paste("Processing", numsubs, "samples", sep = " "))
+
+# Documentation:
+print(paste("This is where the project is:", normalizePath(projdir)))
+print(paste("This is where the sample files are:", normalizePath(sample_dir)))
+print(paste("This is where the data files will be saved:",
+             normalizePath(outpath)))
+```
+
+## Use the given "tissue" and cell type" to determine which gene sets are used
+## in making plots of expression on the umap clusters for this dataset.
+```{r Cell_Identity_Maps}
+# Check to see whether the tissue is brain or blood, then determine what cell
+# types are being analyzed. Make umap gene expression plots accordingly.
+
+# Make resolution name:
+res_name <- paste0(assay, "_snn_res.", chose_resolution)
+# Set cluster identities in Seurat object
+Idents(object = ss_data_norm) <- res_name
+
+plot_features <- function(genes, umap_name) {
+  plot1 <- FeaturePlot(ss_data_norm, 
+                       reduction = "umap", 
+                       features = genes,
+                       min.cutoff = 0)
+  print(plot1)
+  ggsave(filename = paste0(umaps_path, cell_type, umap_name,  nPCs, "_pcs_res.",
+                           chose_resolution, suffix, ".png"),
+         height = 7, width = 11, plot = plot1)
+}
+
+check_genes <- function(pattern){
+  str_subset(rownames(ss_data_norm@assays[[assay]]@scale.data),
+             paste0("^",pattern,"$"))
+}
+
+# Check whether feature genes are in the variable features of your data.
+list_features <- function(genes) {
+  feat_in_data <- lapply(genes, check_genes)
+  feat_in_data <- unique(as.vector(feat_in_data[lapply(feat_in_data, length) >0],
+                                   mode = "character"))
+}
+
+plot_dot_plot <- function(genes, plot_name) {
+  plot2 <- DotPlot(ss_data_norm, 
+                   features = feat_in_data,
+                   assay = assay) + RotatedAxis()
+  print(plot2)
+  ggsave(filename = paste0(umaps_path, cell_type, plot_name, nPCs, "_pcs_res.",
+                           chose_resolution, suffix, ".pdf"),
+         height = 7, width = 11, plot = plot2)
+}
+
+if (identical(tissue_type, "brain")) {
+  print(paste("Tissue analyzed is brain-related."))
+  if (!cell_type %in% c("unsorted", "pu1", "organoid")) {
+    stop(cell_type, " is not associated with brain tissue")
+  }
+  print(paste("The cell-type being analyzed is", cell_type))
+  
+  # Make initial plot of generic brain cell-type specific genes
+  plot_features(c("PDGFRA", "COL9A1", "TMEM63A", "ST18", "LEF1", "ITIH5",
+                  "S100B", "FGFR3", "C3", "CD74", "CHD5", "GABRG2"),
+                "_general_gene_expression_umap_")
+  
+  # Plot known mglia markers
+  plot_features(c("C3", "CD74", "C1QB", "CX3CR1", "SPI1"),
+                "_mglia_gene_expression_umap_")
+  
+  # Plot post-synaptic markers
+  plot_features(c("GRIA1", "GRIN1", "GRIN2B"), 
+                  "_post-synaptic_markers_umap")
+  
+  feature_genes <- c("SPI1", "C3", "CD74", "C1QB","TGFBR2", "CX3CR1", "CCR2",
+                     "GFAP", "S100B", "ALDH1L1", "AQP4", "MAP2","RBFOX3",
+                     "GRIA1", "SATB2", "NRGN", "SLC17A7", "GAD1", "GAD2",
+                     "GRIP2", "NES", "SOX2", "CALB2", "DCX", "NEUROD1", "PDGFRA",
+                     "COL9A1", "COL20A1", "SOX8", "MYT1", "TMEM63A", "ST18",
+                     "LEF1", "ITIH5")
+  feat_in_data <- list_features(feature_genes)
+  plot_dot_plot(feat_in_data, "_general_gene_expression_cluster_dotplot_")
+
+  if (identical(cell_type, "pu1")) {
+    plot3 <- DoHeatmap(ss_data_norm, 
+                      features = feat_in_data,
+                      assay = assay,
+                      raster = FALSE,
+                      hjust = 1,
+                      angle = 0)
+    print(plot3)
+    ggsave(filename = paste0(umaps_path, cell_type,
+                             "_general_gene_expression_cluster_heatmap_",  nPCs,
+                             "_pcs_res.", chose_resolution, suffix, ".pdf"),
+           height = 7, width = 11, plot = plot3)
+    
+    # Change assay to use all genes
+    assay <- "SCT"
+    # Make dotplot of peripheral and central markers
+    feat_in_data <- list_features(c("SPI1", "C3", "CD74", "C1QB","TGFBR2",
+                                    "CX3CR1","CD3E", "CCL5", "CCR2"))
+    plot_dot_plot(feat_in_data, "_peripheral_expression_cluster_dotplot_")
+    # Reset idents to assay defined above for feature plot
+    # Make resolution name:
+    res_name <- paste0(assay, "_snn_res.", chose_resolution)
+    # Set cluster identities in Seurat object
+    Idents(object = ss_data_norm) <- res_name
+    plot_features(c("CD3E", "CCL5", "CCR2"), "_peripheral_expression_umap_")
+  } else {
+    # Plot progenitor markers
+    plot_features(c("NES", "SOX2", "DCX", "NEUROD1", "CALB2"),
+                  "_progenitor_gene_expression_umap_")
+    
+    # Explore known neuronal markers
+    plot_features(c("MAP2", "RBFOX3", "GRIA1"),
+                  "_neuronal_gene_expression_umap_")
+    
+    # Explore known astrocyte markers
+    plot_features(c("GFAP", "S100B", "ALDH1L1", "AQP4"),
+                  "_astrocyte_gene_expression_umap_")
+    
+    # Plot glutamatergic neurons
+    plot_features(c("SLC17A7", "SATB2", "NRGN"),
+                  "_glut_gene_expression_umap_")
+    
+    # Plot gabaergic neuron markers
+    plot_features(c("GAD1", "GAD2", "GRIP2"),
+                "_gaba_gene_expression_umap_")
+    
+    if (identical(cell_type, "organoid")) {
+      # Plot known mesoderm markers
+      plot_features(c("KDR", "MESP1", "MESP2", "LEFTY2", "OSR1", "CSF1R"),
+                    "_mesoderm_gene_expression_umap_")
+      
+      # Plot mature neuronal markers
+      plot_features(c("MAP2", "RBFOX3", "NLGN1", "NRXN1", "SYP", "DLG4"),
+                    "_mature_neuron_gene_expression_umap_")
+      
+      # Plot immature neuronal markers
+      plot_features(c("DCX","TBR1", "BCL11B"),
+                    "_immature_neuron_gene_expression_umap_")
+      
+      # Commitment to neuronal fate markers
+      plot_features(c("TUBB3", "OTX2", "NEUROG2", "ASCL1"),
+                    "_early_neuron_gene_expression_umap_")
+      
+      # Plot neural progenitor markers
+      plot_features(c("NES", "SOX2", "PAX6", "NOTCH1"),
+                    "_neural_progenitor_gene_expression_umap_")
+      
+      # Plot hematopoeitic/myeloid markers
+      plot_features(c("SPI1", "RUNX1", "KIT"),
+                    "_myeloid_progenitor_gene_expression_umap_")
+    }
+  }
+} else {
+  print(paste("Tissue analyzed is blood."))
+  if (!identical(cell_type, "pbmcs")) {
+    stop(cell_type, " is not associated with blood tissue")
+  }
+  print(paste("The cell-type being analyzed is", cell_type))
+  # Make initial plot of generic blood cell-type specific genes
+  plot_features(c("CD68", "S100A12", "CD1C", "BATF3", "CD79A", "MS4A1", "CD3D",
+                  "GNLY", "NKG7", "PPBP", "HBB", "HBA2", "CD34", "PROM1", "KIT"),
+                "_general_gene_expression_umap_")
+  plot_features(c("CD14", "LYZ", "FCGR3A", "MS4A7", "FCER1A", "CST3", "IL3RA",
+                  "GZMB", "SERPINF1", "IL7R", "CCR7", "CD8A", "SELL",
+                  "CREM", "CD69"), "_subtype_gene_expression_umap_")
+  feat_in_data <- list_features(c("CD68", "S100A12", "CD14", "LYZ", "FCGR3A",
+                  "MS4A7", "CD1C", "BATF3", "FCER1A", "CST3", "IL3RA", "GZMB",
+                  "SERPINF1", "CD79A", "MS4A1", "CD3D", "IL7R", "CCR7", "CD8A",
+                  "SELL", "CREM", "CD69", "GNLY", "NKG7", "PPBP", "HBB", "HBA2",
+                  "CD34", "PROM1", "KIT", "CREB3L1",  "SMARCA1", "ZFP9", 
+                  "SNCAIP", "SUPT3H", "NFIL13"))
+  plot_dot_plot(feat_in_data, "_general_gene_expression_cluster_dotplot_")
+}
+```
+
